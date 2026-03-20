@@ -1,0 +1,16 @@
+# Run on your server: copy .env next to this file, then:
+#   docker compose up -d --build
+#
+# Use exactly one replica — Telegram polling cannot run twice with the same token.
+
+services:
+  soc-bot:
+    build: .
+    container_name: socrates-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Optional: pin DNS if your host has resolver issues
+    # dns:
+    #   - 1.1.1.1
+    #   - 8.8.8.8

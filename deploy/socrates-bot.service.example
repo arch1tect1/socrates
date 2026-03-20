@@ -1,0 +1,25 @@
+# systemd — run without Docker on a Linux VPS
+# 1. Copy project to e.g. /opt/socrates
+# 2. python3 -m venv /opt/socrates/.venv && .venv/bin/pip install -r requirements.txt
+# 3. Put .env in /opt/socrates/.env
+# 4. sudo cp socrates-bot.service.example /etc/systemd/system/socrates-bot.service
+# 5. Edit User=Group= and paths if needed; chown -R youruser /opt/socrates
+# 6. sudo systemctl daemon-reload && sudo systemctl enable --now socrates-bot
+
+[Unit]
+Description=SOCrates Telegram bot (AI SOC Agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/socrates
+Environment=PATH=/opt/socrates/.venv/bin:/usr/bin
+ExecStart=/opt/socrates/.venv/bin/python /opt/socrates/bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
