@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+data/profiles/
+data/decisions/
 .venv/
 venv/
 __pycache__/

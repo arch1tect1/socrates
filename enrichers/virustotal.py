@@ -56,12 +56,15 @@ def _parse_vt_body(data: dict[str, Any]) -> dict[str, Any]:
     if meaningful_name:
         associations.append(str(meaningful_name))
 
+    as_owner = attrs.get("as_owner") or attrs.get("network") or ""
+
     return {
         "reputation": rep,
         "last_analysis_stats": stats if isinstance(stats, dict) else {},
         "tags": tags if isinstance(tags, list) else [],
         "known_names_or_associations": associations[:20],
         "crowdsourced_ids": crowdsourced if isinstance(crowdsourced, list) else [],
+        "as_owner": str(as_owner) if as_owner else "",
     }
 
 

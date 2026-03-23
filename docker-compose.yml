@@ -10,7 +10,14 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - DATA_DIR=/app/data
+    volumes:
+      - socrates-data:/app/data
     # Optional: pin DNS if your host has resolver issues
     # dns:
     #   - 1.1.1.1
     #   - 8.8.8.8
+
+volumes:
+  socrates-data:

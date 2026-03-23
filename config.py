@@ -23,6 +23,7 @@ class Config:
     shodan_api_key: str
     anthropic_api_key: str | None
     openai_api_key: str | None
+    data_dir: Path
     http_timeout_seconds: float = 30.0
 
 
@@ -46,6 +47,11 @@ def load_config() -> Config:
             "Missing required environment variables: " + ", ".join(missing)
         )
 
+    data_dir = Path(os.getenv("DATA_DIR", str(_ROOT / "data"))).resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "profiles").mkdir(exist_ok=True)
+    (data_dir / "decisions").mkdir(exist_ok=True)
+
     return Config(
         telegram_bot_token=telegram,
         virustotal_api_key=vt,
@@ -53,4 +59,5 @@ def load_config() -> Config:
         shodan_api_key=shodan,
         anthropic_api_key=anthropic,
         openai_api_key=openai,
+        data_dir=data_dir,
     )

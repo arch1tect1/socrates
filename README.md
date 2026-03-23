@@ -1,6 +1,8 @@
 # SOCrates (AI SOC Agent)
 
-Telegram bot: **AI SOC Agent** — an AI-powered security analyst assistant. Users send IOCs (IPs, domains, hashes) or raw logs; the bot enriches them via VirusTotal, AbuseIPDB (IPs), and Shodan (IPs), then asks an LLM (Claude or OpenAI) for a structured SOC-style verdict.
+Telegram bot **SOCrates** — an AI SOC teammate. It enriches IOCs via VirusTotal, AbuseIPDB, and Shodan, then asks an LLM (Claude or OpenAI) for a structured verdict.
+
+**Adaptive features:** per-chat **organization profile** (`/setup`), **clarifying questions** when enrichment is ambiguous, and **decision memory** with inline feedback (✅/❌) plus `/history`, `/stats`, and `/export`. Data is stored under `data/` (JSON files; set `DATA_DIR` to override).
 
 ## Requirements
 
@@ -62,8 +64,10 @@ mkdir -p ~/socrates && cd ~/socrates
 cp .env.example .env && nano .env   # fill secrets — never commit .env
 
 docker compose up -d --build
-docker compose logs -f              # verify "starting (polling)"
+docker compose logs -f              # verify "SOCrates starting (polling)"
 ```
+
+Compose sets `DATA_DIR=/app/data` and a **named volume** so profiles and decisions survive container restarts.
 
 - **One instance only** — two processes with the same `TELEGRAM_BOT_TOKEN` cause `409 Conflict` on `getUpdates`.
 - **Firewall** — allow outbound HTTPS (default); no need to open port 443 *inbound* for polling.
@@ -78,18 +82,30 @@ Copy `.env` securely (e.g. `scp .env user@server:~/socrates/.env`). On the serve
 
 ## Commands
 
-| Command   | Description                                      |
-|----------|---------------------------------------------------|
-| `/start` | Short usage instructions                          |
-| `/help`  | Supported input types and tips                    |
+| Command | Description |
+|--------|-------------|
+| `/start` | Welcome + quick tips |
+| `/help` | All commands and inputs |
+| `/setup` | Guided org profile (industry, cloud, Tor/VPN policy, CIDRs, stack) |
+| `/profile` | Show saved org profile |
+| `/addpolicy` | Append a custom policy line (natural language) |
+| `/clearpolicy` | Remove all custom policies |
+| `/skip` | During follow-up questions: force best-effort verdict without answers |
+| `/history` | Last 10 decisions; optional `/history 185.x.x.x` to filter |
+| `/stats` | Counts of stored decisions and feedback |
+| `/export` | Download decisions as CSV |
+| `/clearhistory yes` | Delete all decisions for this chat |
 
 ## Behavior
 
-1. **Detection** — Standalone IPv4/IPv6, MD5/SHA1/SHA256, or domain; otherwise the message is treated as **raw log** and IOCs are extracted with regex.
-2. **Enrichment** — VirusTotal for all IOC types; AbuseIPDB + Shodan only for IPs. Failed APIs are noted in the payload; others continue.
-3. **Rate limiting** — VirusTotal free tier: **4 requests per minute** (sliding window) enforced in code.
-4. **Timeouts** — HTTP clients use a **30s** timeout per request.
-5. **Typing** — A typing indicator is refreshed while enrichment and LLM calls run.
+1. **Detection** — Standalone IPv4/IPv6, MD5/SHA1/SHA256, or domain; otherwise **raw log** with regex IOC extraction.
+2. **Org profile** — Never-block / own-infra CIDRs add `org_match` on IPs; context is injected into the LLM when a profile exists.
+3. **Ambiguity mode** — For a **single** enriched IOC, if rules fire (cloud/Tor/mixed VT/org-protected/VPN/low abuse score), the bot asks clarifying questions first; reply in chat or `/skip`.
+4. **Memory** — After each verdict, inline buttons store feedback; similar past cases are summarized for the model.
+5. **Enrichment** — VirusTotal for all IOC types; AbuseIPDB + Shodan for public IPs. Failed APIs are noted in the payload.
+6. **Rate limiting** — VirusTotal free tier: **4 requests/minute** (sliding window).
+7. **Timeouts** — HTTP clients use **30s** per request (Telegram client uses longer connect/read timeouts).
+8. **Typing** — Chat action “typing” while working.
 
 ## Project layout
 
@@ -99,9 +115,13 @@ socrates/
 ├── config.py
 ├── detector.py
 ├── enrichers/
+├── org_profile/       # profile JSON + LLM context + CIDR matching
+├── dialogue/          # ambiguity, sessions, follow-up questions
+├── memory/            # decisions, similarity, feedback helpers
 ├── analyzer.py
 ├── formatter.py
 ├── ioc_extractor.py
+├── data/              # runtime: profiles/ decisions/ (gitignored contents)
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
