@@ -50,6 +50,81 @@ def classify_ip_against_org(ip: str, profile: OrgProfile) -> str | None:
     return None
 
 
+def _network_from_authorized_vpn_line(
+    line: str,
+) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """First token is CIDR or single IP; name-only lines return None."""
+    s = line.strip()
+    if not s:
+        return None
+    first = s.split(None, 1)[0]
+    try:
+        return ipaddress.ip_network(first, strict=False)
+    except ValueError:
+        try:
+            addr = ipaddress.ip_address(first)
+            if addr.version == 4:
+                return ipaddress.ip_network(f"{addr}/32", strict=False)
+            return ipaddress.ip_network(f"{addr}/128", strict=False)
+        except ValueError:
+            return None
+
+
+def ip_in_authorized_vpns(ip: str, profile: OrgProfile) -> str | None:
+    """Return the matching authorized_vpns entry string, or None."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for entry_line in profile.authorized_vpns:
+        net = _network_from_authorized_vpn_line(entry_line)
+        if net and addr in net:
+            return entry_line
+    return None
+
+
+def _enrichment_suggests_vpn_or_proxy(entry: dict[str, Any]) -> bool:
+    abuse = entry.get("abuseipdb") or {}
+    if not isinstance(abuse, dict) or abuse.get("error"):
+        return False
+    usage = str(abuse.get("usageType", "") or "").lower()
+    return any(kw in usage for kw in ("vpn", "proxy", "hosting"))
+
+
+def apply_vpn_proxy_policy(entry: dict[str, Any], profile: OrgProfile | None) -> None:
+    """
+    For IPs flagged as VPN/proxy/hosting in enrichment, set entry['vpn_traffic']:
+    authorized (CIDR matches authorized_vpns) or unknown (apply unknown_vpn_policy).
+    """
+    if entry.get("kind") != "ip" or entry.get("enrichment_skipped") or not profile:
+        return
+    if not _enrichment_suggests_vpn_or_proxy(entry):
+        entry.pop("vpn_traffic", None)
+        return
+    ioc = entry.get("ioc")
+    if not ioc or not isinstance(ioc, str):
+        return
+    matched = ip_in_authorized_vpns(ioc, profile)
+    if matched:
+        entry["vpn_traffic"] = {
+            "status": "authorized",
+            "matched_entry": matched,
+            "guidance": (
+                "This IP falls within an organization-authorized VPN/proxy range. "
+                "Treat as legitimate org egress unless other signals show compromise."
+            ),
+        }
+    else:
+        entry["vpn_traffic"] = {
+            "status": "unknown",
+            "org_policy": profile.unknown_vpn_policy or "not set",
+            "guidance": (
+                "VPN/proxy/hosting usage not in authorized_vpns. Apply the organization's "
+                "unknown_vpn_policy (block / monitor / allow) unless enrichment shows clear malicious activity."
+            ),
+        }
+
+
 def apply_org_match_to_entry(entry: dict[str, Any], profile: OrgProfile | None) -> None:
     """Mutate entry in place with org_match when kind is ip."""
     if entry.get("kind") != "ip" or entry.get("enrichment_skipped"):
@@ -86,7 +161,15 @@ def build_org_context(data_dir: Path, chat_id: int) -> str:
             "do NOT recommend blocking without further context)"
         )
     lines.append(f"- Tor policy: {p.tor_policy or 'not set'}")
-    lines.append(f"- VPN policy (external VPNs): {p.vpn_policy or 'not set'}")
+    if p.authorized_vpns:
+        av = "; ".join(p.authorized_vpns)
+        lines.append(f"- Authorized VPN/proxy ranges (org): {av}")
+    else:
+        lines.append("- Authorized VPN/proxy ranges (org): none recorded")
+    lines.append(
+        f"- Policy for unknown/unauthorized VPN or proxy traffic: "
+        f"{p.unknown_vpn_policy or 'not set'} (block / monitor / allow)"
+    )
     if p.never_block_ips:
         lines.append(f"- Never-block CIDRs: {', '.join(p.never_block_ips)}")
     if p.own_infrastructure:
@@ -102,7 +185,11 @@ def build_org_context(data_dir: Path, chat_id: int) -> str:
         "IMPORTANT: Your recommendations MUST respect these organization policies. "
         "If an IOC conflicts with a never-block IP or belongs to the organization's "
         "cloud provider context, you MUST flag this explicitly and suggest alternatives "
-        "to full blocking (rate limiting, geo-blocking, monitoring, WAF rules, etc.)."
+        "to full blocking (rate limiting, geo-blocking, monitoring, WAF rules, etc.). "
+        "If enrichment JSON shows vpn_traffic.status authorized, state that the IP matches "
+        "an authorized org VPN/proxy range and is expected legitimate traffic unless "
+        "contradicted by strong malicious signals. If vpn_traffic.status unknown, align "
+        "handling with unknown_vpn_policy (block, monitor, or allow) as the default stance."
     )
     return "\n".join(lines)
 
@@ -113,7 +200,8 @@ def format_profile_summary(p: OrgProfile) -> str:
         f"<b>Industry</b>: {p.industry or '—'}",
         f"<b>Cloud</b>: {', '.join(p.cloud_providers) or '—'}",
         f"<b>Tor policy</b>: {p.tor_policy or '—'}",
-        f"<b>VPN policy</b>: {p.vpn_policy or '—'}",
+        f"<b>Authorized VPNs</b>: {', '.join(p.authorized_vpns) or '—'}",
+        f"<b>Unknown VPN/proxy policy</b>: {p.unknown_vpn_policy or '—'}",
         f"<b>Never-block CIDRs</b>: {', '.join(p.never_block_ips) or '—'}",
         f"<b>Own infra CIDRs</b>: {', '.join(p.own_infrastructure) or '—'}",
         f"<b>Security stack</b>: {p.security_stack or '—'}",

@@ -14,7 +14,8 @@ class OrgProfile:
     industry: str = ""
     cloud_providers: list[str] = field(default_factory=list)
     tor_policy: str = ""
-    vpn_policy: str = ""
+    authorized_vpns: list[str] = field(default_factory=list)
+    unknown_vpn_policy: str = ""
     never_block_ips: list[str] = field(default_factory=list)
     own_infrastructure: list[str] = field(default_factory=list)
     security_stack: str = ""
@@ -33,7 +34,10 @@ class OrgProfile:
             industry=str(data.get("industry", "")),
             cloud_providers=list(data.get("cloud_providers") or []),
             tor_policy=str(data.get("tor_policy", "")),
-            vpn_policy=str(data.get("vpn_policy", "")),
+            authorized_vpns=list(data.get("authorized_vpns") or []),
+            unknown_vpn_policy=str(
+                data.get("unknown_vpn_policy", "") or data.get("vpn_policy", "")
+            ),
             never_block_ips=list(data.get("never_block_ips") or []),
             own_infrastructure=list(data.get("own_infrastructure") or []),
             security_stack=str(data.get("security_stack", "")),

@@ -86,11 +86,11 @@ Copy `.env` securely (e.g. `scp .env user@server:~/socrates/.env`). On the serve
 |--------|-------------|
 | `/start` | Welcome + quick tips |
 | `/help` | All commands and inputs |
-| `/setup` | Guided org profile (industry, cloud, Tor/VPN policy, CIDRs, stack) |
+| `/setup` | Guided org profile (industry, cloud, Tor, authorized VPNs + unknown-VPN policy, CIDRs, stack) |
 | `/profile` | Show saved org profile |
 | `/addpolicy` | Append a custom policy line (natural language) |
 | `/clearpolicy` | Remove all custom policies |
-| `/skip` | During follow-up questions: force best-effort verdict without answers |
+| `/skip` | Only during follow-up questions: force best-effort verdict (ignored otherwise) |
 | `/history` | Last 10 decisions; optional `/history 185.x.x.x` to filter |
 | `/stats` | Counts of stored decisions and feedback |
 | `/export` | Download decisions as CSV |
@@ -99,9 +99,9 @@ Copy `.env` securely (e.g. `scp .env user@server:~/socrates/.env`). On the serve
 ## Behavior
 
 1. **Detection** — Standalone IPv4/IPv6, MD5/SHA1/SHA256, or domain; otherwise **raw log** with regex IOC extraction.
-2. **Org profile** — Never-block / own-infra CIDRs add `org_match` on IPs; context is injected into the LLM when a profile exists.
-3. **Ambiguity mode** — For a **single** enriched IOC, if rules fire (cloud/Tor/mixed VT/org-protected/VPN/low abuse score), the bot asks clarifying questions first; reply in chat or `/skip`.
-4. **Memory** — After each verdict, inline buttons store feedback; similar past cases are summarized for the model.
+2. **Org profile** — Never-block / own-infra CIDRs add `org_match` on IPs. Authorized VPN CIDRs (with labels) and an **unknown VPN/proxy policy** are stored; AbuseIPDB VPN/proxy/hosting IPs get `vpn_traffic` (`authorized` vs `unknown`) for the model. Context is injected when a profile exists.
+3. **Ambiguity mode** — For a **single** enriched IOC, if rules fire (cloud/Tor/mixed VT/org-protected/VPN/low abuse score), the bot asks clarifying questions first; reply in chat or `/skip`. VPN/proxy ambiguity is skipped when the org profile already resolved the IP (`vpn_traffic` authorized/unknown).
+4. **Memory** — After verdicts with real IOC enrichment, inline buttons store feedback; similar past cases are summarized for the model. No feedback buttons on inconclusive “no IOCs extracted” style outcomes.
 5. **Enrichment** — VirusTotal for all IOC types; AbuseIPDB + Shodan for public IPs. Failed APIs are noted in the payload.
 6. **Rate limiting** — VirusTotal free tier: **4 requests/minute** (sliding window).
 7. **Timeouts** — HTTP clients use **30s** per request (Telegram client uses longer connect/read timeouts).

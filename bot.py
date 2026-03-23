@@ -39,7 +39,12 @@ from memory.retriever import (
     format_past_decisions_for_llm,
 )
 from memory.store import clear_all_decisions, load_all_decisions, parse_verdict_lines, save_decision
-from org_profile.context_builder import apply_org_match_to_entry, build_org_context, format_profile_summary
+from org_profile.context_builder import (
+    apply_org_match_to_entry,
+    apply_vpn_proxy_policy,
+    build_org_context,
+    format_profile_summary,
+)
 from org_profile.models import OrgProfile
 from org_profile.storage import load_profile, parse_cidr_list, parse_cloud_list, save_profile
 
@@ -237,7 +242,27 @@ def _apply_org_profile_to_payload(
         return None
     for e in payload.get("ioc_entries") or []:
         apply_org_match_to_entry(e, prof)
+        apply_vpn_proxy_policy(e, prof)
     return prof
+
+
+def _should_show_feedback_buttons(
+    entry: dict[str, Any] | None,
+    payload: dict[str, Any],
+    verdict: str,
+    analysis: str,
+) -> bool:
+    if entry is None:
+        return False
+    note = (payload.get("note") or "").lower()
+    if "no iocs were extracted" in note:
+        return False
+    v = (verdict or "").strip().lower()
+    if v == "inconclusive":
+        a = analysis.lower()
+        if "no iocs extracted" in a or "no ioc extracted" in a:
+            return False
+    return True
 
 
 def _feedback_keyboard(decision_id: str) -> InlineKeyboardMarkup:
@@ -271,6 +296,7 @@ async def _send_verdict_with_memory(
     data_dir = context.bot_data["data_dir"]
     decision_id = uuid.uuid4().hex
     v, sev = parse_verdict_lines(analysis)
+    show_feedback = _should_show_feedback_buttons(entry, payload, v, analysis)
     summ = build_enrichment_summary(entry) if entry else {}
     rec = create_decision_record(
         decision_id=decision_id,
@@ -288,7 +314,11 @@ async def _send_verdict_with_memory(
     formatted = format_telegram_report(analysis, title="SOCrates")
     chunks = _chunk_message(formatted)
     for i, chunk in enumerate(chunks):
-        rm = _feedback_keyboard(decision_id) if i == len(chunks) - 1 else None
+        rm = (
+            _feedback_keyboard(decision_id)
+            if i == len(chunks) - 1 and show_feedback
+            else None
+        )
         try:
             await msg.reply_html(chunk, reply_markup=rm)
         except TelegramError as e:
@@ -512,7 +542,9 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     sess = get_session(chat_id)
     if not sess or sess.status != "awaiting_followup":
-        await update.effective_message.reply_text("No pending follow-up session.")
+        await update.effective_message.reply_text(
+            "No active analysis to skip. Send me an IOC or alert to analyze."
+        )
         return
     data_dir = context.bot_data["data_dir"]
     org_block = build_org_context(data_dir, chat_id)
@@ -652,7 +684,8 @@ async def handle_setup_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "org_name",
         "cloud_providers",
         "tor_policy",
-        "vpn_policy",
+        "authorized_vpns",
+        "unknown_vpn_policy",
         "never_block_ips",
         "own_infrastructure",
         "security_stack",
@@ -660,6 +693,8 @@ async def handle_setup_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     key = keys[step]
     if key == "cloud_providers":
         st["answers"][key] = parse_cloud_list(text)
+    elif key == "authorized_vpns":
+        st["answers"][key] = parse_cidr_list(text)
     elif key in ("never_block_ips", "own_infrastructure"):
         st["answers"][key] = parse_cidr_list(text)
     else:
@@ -676,7 +711,8 @@ async def handle_setup_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             org_name=a.get("org_name", ""),
             cloud_providers=a.get("cloud_providers") or [],
             tor_policy=a.get("tor_policy", ""),
-            vpn_policy=a.get("vpn_policy", ""),
+            authorized_vpns=a.get("authorized_vpns") or [],
+            unknown_vpn_policy=a.get("unknown_vpn_policy", ""),
             never_block_ips=a.get("never_block_ips") or [],
             own_infrastructure=a.get("own_infrastructure") or [],
             security_stack=a.get("security_stack", ""),
@@ -691,7 +727,10 @@ async def handle_setup_step(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "What is your organization's name? (used only for report context)",
         "What cloud providers do you use? (AWS, Azure, GCP, none, other — comma-separated)",
         "What is your Tor policy? (block, monitor, allow)",
-        "What is your VPN policy for external VPNs? (block, monitor, allow)",
+        "Do you have authorized VPN connections? (site-to-site, remote access, etc.) "
+        "If yes, list their IP ranges or names, comma-separated. Send 'skip' if none.",
+        "What should I do when I see UNKNOWN/unauthorized VPN or proxy traffic? "
+        "(block, monitor, allow)",
         "Any IP ranges or CIDRs that should NEVER be blocked? (comma-separated, or 'skip')",
         "Any IP ranges that are your own infrastructure? (comma-separated, or 'skip')",
         "What EDR/firewall/SIEM do you use? (free text, or 'skip')",

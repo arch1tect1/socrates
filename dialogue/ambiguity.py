@@ -59,7 +59,9 @@ def detect_ambiguity(
     if isinstance(abuse, dict) and not abuse.get("error"):
         usage = str(abuse.get("usageType", "") or "").lower()
         if any(kw in usage for kw in ("vpn", "proxy", "hosting")):
-            flags.append("VPN_PROXY")
+            vpn_ctx = entry.get("vpn_traffic") if isinstance(entry.get("vpn_traffic"), dict) else {}
+            if str(vpn_ctx.get("status", "")).lower() not in ("authorized", "unknown"):
+                flags.append("VPN_PROXY")
 
         score = abuse.get("abuseConfidenceScore")
         if isinstance(score, (int, float)) and 20 < score < 60:
