@@ -418,7 +418,7 @@ async def process_ioc_pipeline(
             followup_questions=questions,
             status="awaiting_followup",
         )
-        put_session(sess)
+        put_session(sess, data_dir)
         qtext = "\n".join(f"• {q}" for q in questions)
         if msg:
             await msg.reply_html(
@@ -540,13 +540,13 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     chat_id = update.effective_chat.id
-    sess = get_session(chat_id)
+    data_dir = context.bot_data["data_dir"]
+    sess = get_session(chat_id, data_dir)
     if not sess or sess.status != "awaiting_followup":
         await update.effective_message.reply_text(
             "No active analysis to skip. Send me an IOC or alert to analyze."
         )
         return
-    data_dir = context.bot_data["data_dir"]
     org_block = build_org_context(data_dir, chat_id)
     entry = sess.enrichment_data
     past_block = ""
@@ -563,7 +563,7 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ANALYST PROVIDED ADDITIONAL CONTEXT:\n"
         "Analyst chose /skip — provide a best-effort verdict without follow-up answers."
     )
-    clear_session(chat_id)
+    clear_session(chat_id, data_dir)
     await _run_llm_pipeline(
         update,
         context,
@@ -828,7 +828,7 @@ async def handle_dialogue_reply(
         f"- Analyst responses: {ans}\n"
         "Given this context and enrichment, give a SPECIFIC, ACTIONABLE verdict."
     )
-    clear_session(chat_id)
+    clear_session(chat_id, data_dir)
     await _run_llm_pipeline(
         update,
         context,
@@ -851,6 +851,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user_text:
         return
 
+    data_dir = context.bot_data["data_dir"]
+
+    # Must run before /setup, feedback notes, or new IOC detection — otherwise the
+    # analyst's free-text reply is misrouted (e.g. as a profile answer or feedback).
+    sess = get_session(chat_id, data_dir)
+    if sess and sess.status == "awaiting_followup":
+        await handle_dialogue_reply(update, context, sess, user_text)
+        return
+
     if context.user_data.get("setup") is not None:
         await handle_setup_step(update, context)
         return
@@ -858,11 +867,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     fp = context.bot_data.get("feedback_pending", {}).get(chat_id)
     if fp:
         await handle_feedback_pending_text(update, context, fp, user_text)
-        return
-
-    sess = get_session(chat_id)
-    if sess and sess.status == "awaiting_followup":
-        await handle_dialogue_reply(update, context, sess, user_text)
         return
 
     await process_ioc_pipeline(update, context, user_text)

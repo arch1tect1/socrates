@@ -3,6 +3,7 @@
 !.env.example
 data/profiles/
 data/decisions/
+data/dialogue_sessions/
 .venv/
 venv/
 __pycache__/
