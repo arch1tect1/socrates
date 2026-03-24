@@ -1,0 +1,4 @@
+{
+  "authorized": "This IP falls within an organization-authorized VPN/proxy range. Treat as legitimate org egress unless other signals show compromise.",
+  "unknown": "VPN/proxy/hosting usage not in authorized_vpns. Apply the organization's unknown_vpn_policy (block / monitor / allow) unless enrichment shows clear malicious activity."
+}

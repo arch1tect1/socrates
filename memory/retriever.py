@@ -6,6 +6,8 @@ import ipaddress
 from pathlib import Path
 from typing import Any
 
+from prompts.load import load_past_decisions_footer
+
 from .models import DecisionRecord
 from .store import load_all_decisions
 
@@ -107,11 +109,7 @@ def format_past_decisions_for_llm(records: list[DecisionRecord]) -> str:
         if d.analyst_action_taken:
             lines.append(f"   → Action: {d.analyst_action_taken}")
         lines.append("")
-    lines.append(
-        "IMPORTANT: Consider these past decisions when forming your verdict. "
-        "If the team has consistently allowed or blocked similar IOCs, align with "
-        "that pattern unless there is a clear reason to deviate. If deviating, explain why."
-    )
+    lines.append(load_past_decisions_footer())
     return "\n".join(lines)
 
 

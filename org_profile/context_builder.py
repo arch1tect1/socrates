@@ -7,6 +7,8 @@ import ipaddress
 from pathlib import Path
 from typing import Any
 
+from prompts.load import load_org_context_footer, load_vpn_guidance
+
 from .models import OrgProfile
 from .storage import load_profile
 
@@ -105,23 +107,18 @@ def apply_vpn_proxy_policy(entry: dict[str, Any], profile: OrgProfile | None) ->
     if not ioc or not isinstance(ioc, str):
         return
     matched = ip_in_authorized_vpns(ioc, profile)
+    g = load_vpn_guidance()
     if matched:
         entry["vpn_traffic"] = {
             "status": "authorized",
             "matched_entry": matched,
-            "guidance": (
-                "This IP falls within an organization-authorized VPN/proxy range. "
-                "Treat as legitimate org egress unless other signals show compromise."
-            ),
+            "guidance": g.get("authorized", ""),
         }
     else:
         entry["vpn_traffic"] = {
             "status": "unknown",
             "org_policy": profile.unknown_vpn_policy or "not set",
-            "guidance": (
-                "VPN/proxy/hosting usage not in authorized_vpns. Apply the organization's "
-                "unknown_vpn_policy (block / monitor / allow) unless enrichment shows clear malicious activity."
-            ),
+            "guidance": g.get("unknown", ""),
         }
 
 
@@ -181,16 +178,7 @@ def build_org_context(data_dir: Path, chat_id: int) -> str:
         for rule in p.custom_policies:
             lines.append(f"  • {rule}")
 
-    lines.append(
-        "IMPORTANT: Your recommendations MUST respect these organization policies. "
-        "If an IOC conflicts with a never-block IP or belongs to the organization's "
-        "cloud provider context, you MUST flag this explicitly and suggest alternatives "
-        "to full blocking (rate limiting, geo-blocking, monitoring, WAF rules, etc.). "
-        "If enrichment JSON shows vpn_traffic.status authorized, state that the IP matches "
-        "an authorized org VPN/proxy range and is expected legitimate traffic unless "
-        "contradicted by strong malicious signals. If vpn_traffic.status unknown, align "
-        "handling with unknown_vpn_policy (block, monitor, or allow) as the default stance."
-    )
+    lines.append(load_org_context_footer())
     return "\n".join(lines)
 
 

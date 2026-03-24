@@ -1,0 +1,27 @@
+{
+  "CLOUD_PROVIDER_IP": [
+    "This IP may be tied to a major cloud/CDN provider. Does your organization use this provider's services?",
+    "What type of traffic are you seeing? (DDoS, scanning, data exfiltration, other)",
+    "Is this impacting production systems right now?"
+  ],
+  "TOR_EXIT_NODE": [
+    "This looks like Tor-related traffic in enrichment. Does your organization allow Tor?",
+    "What triggered this alert? (inbound connection, outbound from internal host, other)"
+  ],
+  "MIXED_REPUTATION": [
+    "Reputation data is mixed across vendors.",
+    "What is the context? (appeared in alert, found in logs, threat intel report, other)"
+  ],
+  "ORG_PROTECTED_IP": [
+    "⚠️ This IP is in your protected / never-block or own-infrastructure list.",
+    "Is this a legitimate concern or possible misconfiguration? What behavior triggered this?"
+  ],
+  "VPN_PROXY": [
+    "This IP is associated with VPN/hosting/proxy usage in threat data.",
+    "Is this from an internal user using VPN, or external traffic?"
+  ],
+  "LOW_CONFIDENCE": [
+    "Threat data is inconclusive (moderate abuse score).",
+    "Can you provide more context — where did you encounter this IOC?"
+  ]
+}

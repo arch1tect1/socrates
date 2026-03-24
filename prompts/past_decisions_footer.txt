@@ -1,0 +1,1 @@
+IMPORTANT: Consider these past decisions when forming your verdict. If the team has consistently allowed or blocked similar IOCs, align with that pattern unless there is a clear reason to deviate. If deviating, explain why.

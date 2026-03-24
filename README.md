@@ -32,6 +32,8 @@ Edit `.env` with your keys. Required: `TELEGRAM_BOT_TOKEN`, `VIRUSTOTAL_API_KEY`
 
 If Anthropic returns **404 / `not_found_error` for `model`**, your `CLAUDE_MODEL` is invalid or retired — set `CLAUDE_MODEL` to a [current model ID](https://docs.anthropic.com/en/docs/about-claude/models) (the default in code is updated when defaults change).
 
+**Prompts:** LLM instructions and follow-up question templates live under `prompts/` (e.g. `system_soc_analyst.txt`, `followup_questions.json`). Edit those files to tune behavior without changing Python code.
+
 ## Run
 
 From the repository root:
@@ -117,6 +119,7 @@ socrates/
 ├── config.py
 ├── detector.py
 ├── enrichers/
+├── prompts/           # LLM system prompt + dialogue question templates (editable text/JSON)
 ├── org_profile/       # profile JSON + LLM context + CIDR matching
 ├── dialogue/          # ambiguity, sessions, follow-up questions
 ├── memory/            # decisions, similarity, feedback helpers
