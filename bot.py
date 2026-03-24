@@ -490,16 +490,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     text = (
-        "<b>🛡 SOCrates</b> — your AI SOC teammate\n\n"
-        "Send me any of these:\n"
-        "- IP address → <code>185.220.101.34</code>\n"
-        "- Domain → <code>suspicious-domain.com</code>\n"
-        "- File hash (MD5/SHA1/SHA256)\n"
-        "- Raw log or alert (JSON, syslog, any format)\n\n"
-        "I'll enrich it via VirusTotal, AbuseIPDB &amp; Shodan, then give you a verdict, "
-        "MITRE ATT&amp;CK mapping, and recommended actions.\n\n"
-        "Just paste and send — no commands needed.\n\n"
-        "<b>Commands:</b> /setup /profile /help /history /stats /export"
+        "🛡 SOCrates — your AI SOC teammate\n\n"
+        "Send me any IP, domain, file hash, or raw log/alert — I'll enrich it and give you "
+        "a threat verdict with MITRE ATT&amp;CK mapping and recommended actions.\n\n"
+        "⚙️ <b>FIRST TIME?</b> Set up your organization profile for smarter, context-aware "
+        "verdicts:\n"
+        "→ <code>/setup</code> — Configure your org policies, cloud providers, and protected "
+        "assets (recommended for teams)\n\n"
+        "Skip <code>/setup</code> if you're using SOCrates for personal research — I'll still "
+        "analyze IOCs, just without org-specific recommendations.\n\n"
+        "📌 <b>COMMANDS:</b>\n"
+        "/setup — Set up organization profile\n"
+        "/profile — View your current profile\n"
+        "/addpolicy — Add a custom security policy\n"
+        "/help — Show supported input types and examples\n"
+        "/history — View past analyses\n"
+        "/stats — View analysis statistics\n\n"
+        "Just paste any IOC and send — no commands needed."
     )
     await update.effective_message.reply_html(text)
 
