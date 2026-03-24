@@ -1,6 +1,6 @@
 # SOCrates (AI SOC Agent)
 
-Telegram bot **SOCrates** — an AI SOC teammate. It enriches IOCs via VirusTotal, AbuseIPDB, and Shodan, then asks an LLM (Claude or OpenAI) for a structured verdict.
+Telegram bot **SOCrates** — an AI SOC teammate. It enriches IOCs via VirusTotal, AbuseIPDB, Shodan, urlscan.io, and AlienVault OTX, then asks an LLM (Claude or OpenAI) for a structured verdict.
 
 **Adaptive features:** per-chat **organization profile** (`/setup`), **clarifying questions** when enrichment is ambiguous, and **decision memory** with inline feedback (✅/❌) plus `/history`, `/stats`, and `/export`. Data is stored under `data/` (JSON files; set `DATA_DIR` to override).
 
@@ -9,7 +9,7 @@ Telegram bot **SOCrates** — an AI SOC teammate. It enriches IOCs via VirusTota
 - Python **3.11+**
 - Telegram bot token ([BotFather](https://t.me/BotFather))
 - [VirusTotal](https://www.virustotal.com/gui/join-us) API key (required)
-- [AbuseIPDB](https://www.abuseipdb.com/) and [Shodan](https://www.shodan.io/) keys optional but recommended for IP context
+- [AbuseIPDB](https://www.abuseipdb.com/), [Shodan](https://www.shodan.io/), [urlscan.io](https://urlscan.io/), and [AlienVault OTX](https://otx.alienvault.com/) keys optional but recommended
 - **Anthropic** and/or **OpenAI** API key (at least one)
 
 ## Setup
@@ -27,6 +27,8 @@ copy .env.example .env            # Windows — fill in secrets
 ```
 
 Edit `.env` with your keys. Required: `TELEGRAM_BOT_TOKEN`, `VIRUSTOTAL_API_KEY`, and either `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+
+**Which LLM runs:** if `ANTHROPIC_API_KEY` is set (non-empty), the bot uses **Claude** (`CLAUDE_MODEL`). Otherwise it uses the **OpenAI API** (`OPENAI_MODEL`) — the same product family as ChatGPT, not the consumer web chat. Each Telegram verdict includes a footer such as `LLM: Claude (…)` or `LLM: OpenAI ChatGPT API (…)`.
 
 If Anthropic returns **404 / `not_found_error` for `model`**, your `CLAUDE_MODEL` is invalid or retired — set `CLAUDE_MODEL` to a [current model ID](https://docs.anthropic.com/en/docs/about-claude/models) (the default in code is updated when defaults change).
 
@@ -102,7 +104,7 @@ Copy `.env` securely (e.g. `scp .env user@server:~/socrates/.env`). On the serve
 2. **Org profile** — Never-block / own-infra CIDRs add `org_match` on IPs. Authorized VPN CIDRs (with labels) and an **unknown VPN/proxy policy** are stored; AbuseIPDB VPN/proxy/hosting IPs get `vpn_traffic` (`authorized` vs `unknown`) for the model. Context is injected when a profile exists.
 3. **Ambiguity mode** — For a **single** enriched IOC, if rules fire (cloud/Tor/mixed VT/org-protected/VPN/low abuse score), the bot asks clarifying questions first; reply in chat or `/skip`. VPN/proxy ambiguity is skipped when the org profile already resolved the IP (`vpn_traffic` authorized/unknown).
 4. **Memory** — After verdicts with real IOC enrichment, inline buttons store feedback; similar past cases are summarized for the model. No feedback buttons on inconclusive “no IOCs extracted” style outcomes.
-5. **Enrichment** — VirusTotal for all IOC types; AbuseIPDB + Shodan for public IPs. Failed APIs are noted in the payload.
+5. **Enrichment** — VirusTotal + OTX for all IOC types; AbuseIPDB + Shodan for public IPs; urlscan for domains. Failed APIs are noted in the payload and analysis continues.
 6. **Rate limiting** — VirusTotal free tier: **4 requests/minute** (sliding window).
 7. **Timeouts** — HTTP clients use **30s** per request (Telegram client uses longer connect/read timeouts).
 8. **Typing** — Chat action “typing” while working.

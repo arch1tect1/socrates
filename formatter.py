@@ -5,11 +5,19 @@ from __future__ import annotations
 import html
 
 
-def format_telegram_report(llm_text: str, title: str = "SOCrates") -> str:
+def format_telegram_report(
+    llm_text: str,
+    title: str = "SOCrates",
+    *,
+    llm_source: str | None = None,
+) -> str:
     """Wrap analyst output in a compact header; escape for HTML parse mode."""
     safe = html.escape(llm_text.strip())
     header = html.escape(title)
-    return f"<b>{header}</b>\n\n{safe}"
+    out = f"<b>{header}</b>\n\n{safe}"
+    if llm_source and llm_source.strip():
+        out += f"\n\n<i>{html.escape(llm_source.strip())}</i>"
+    return out
 
 
 def plain_report(llm_text: str, title: str = "SOCrates") -> str:

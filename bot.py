@@ -23,7 +23,9 @@ from dialogue.ambiguity import detect_ambiguity, first_enriched_entry
 from dialogue.followup import format_preliminary, generate_followups
 from dialogue.session import SessionState, clear_session, get_session, put_session
 from enrichers.abuseipdb import AbuseIPDBClient
+from enrichers.otx import OTXClient
 from enrichers.shodan_client import ShodanClient
+from enrichers.urlscan import UrlscanClient
 from enrichers.virustotal import VirusTotalClient
 from formatter import format_telegram_report
 from ioc_extractor import (
@@ -97,39 +99,70 @@ async def _enrich_one(
     vt: VirusTotalClient,
     abuse: AbuseIPDBClient,
     shodan: ShodanClient,
+    urlscan: UrlscanClient,
+    otx: OTXClient,
     kind: str,
     value: str,
 ) -> dict[str, Any]:
     if kind == "ip":
-        vt_r, abuse_r, shodan_r = await asyncio.gather(
+        results = await asyncio.gather(
             vt.get_ip(value),
             abuse.check_ip(value),
             shodan.host(value),
+            otx.get_ip(value),
+            return_exceptions=True,
         )
+        vt_r, abuse_r, shodan_r, otx_r = [
+            r if not isinstance(r, Exception) else {"error": True, "detail": str(r)}
+            for r in results
+        ]
         return {
             "ioc": value,
             "kind": kind,
             "virustotal": vt_r,
             "abuseipdb": abuse_r,
             "shodan": shodan_r,
+            "urlscan": None,
+            "otx": otx_r,
         }
     if kind == "domain":
-        vt_r = await vt.get_domain(value)
+        results = await asyncio.gather(
+            vt.get_domain(value),
+            urlscan.search_domain(value),
+            otx.get_domain(value),
+            return_exceptions=True,
+        )
+        vt_r, urlscan_r, otx_r = [
+            r if not isinstance(r, Exception) else {"error": True, "detail": str(r)}
+            for r in results
+        ]
         return {
             "ioc": value,
             "kind": kind,
             "virustotal": vt_r,
             "abuseipdb": None,
             "shodan": None,
+            "urlscan": urlscan_r,
+            "otx": otx_r,
         }
     if kind == "hash":
-        vt_r = await vt.get_file(value)
+        results = await asyncio.gather(
+            vt.get_file(value),
+            otx.get_file(value),
+            return_exceptions=True,
+        )
+        vt_r, otx_r = [
+            r if not isinstance(r, Exception) else {"error": True, "detail": str(r)}
+            for r in results
+        ]
         return {
             "ioc": value,
             "kind": kind,
             "virustotal": vt_r,
             "abuseipdb": None,
             "shodan": None,
+            "urlscan": None,
+            "otx": otx_r,
         }
     raise ValueError(f"unsupported kind: {kind}")
 
@@ -138,6 +171,8 @@ async def build_payload(
     vt: VirusTotalClient,
     abuse: AbuseIPDBClient,
     shodan: ShodanClient,
+    urlscan: UrlscanClient,
+    otx: OTXClient,
     text: str,
 ) -> dict[str, Any]:
     det = detect_input(text)
@@ -166,7 +201,9 @@ async def build_payload(
                 )
                 continue
             try:
-                e = await _enrich_one(vt, abuse, shodan, item.kind, item.value)
+                e = await _enrich_one(
+                    vt, abuse, shodan, urlscan, otx, item.kind, item.value
+                )
                 entries.append(e)
             except Exception as ex:  # noqa: BLE001
                 logger.exception("enrichment failed for %s", item)
@@ -225,7 +262,9 @@ async def build_payload(
             ),
         }
 
-    entry = await _enrich_one(vt, abuse, shodan, det.kind.value, det.primary_value)
+    entry = await _enrich_one(
+        vt, abuse, shodan, urlscan, otx, det.kind.value, det.primary_value
+    )
     return {
         "input_mode": "single",
         "original_text": det.raw_text,
@@ -285,6 +324,7 @@ async def _send_verdict_with_memory(
     context: ContextTypes.DEFAULT_TYPE,
     analysis: str,
     *,
+    llm_source: str = "",
     entry: dict[str, Any] | None,
     payload: dict[str, Any],
     ambiguity_flags: list[str],
@@ -311,7 +351,10 @@ async def _send_verdict_with_memory(
     )
     save_decision(data_dir, rec)
 
-    formatted = format_telegram_report(analysis, title="SOCrates")
+    src_line = f"LLM: {llm_source}" if llm_source else ""
+    formatted = format_telegram_report(
+        analysis, title="SOCrates", llm_source=src_line or None
+    )
     chunks = _chunk_message(formatted)
     for i, chunk in enumerate(chunks):
         rm = (
@@ -342,7 +385,7 @@ async def _run_llm_pipeline(
     ambiguity_flags = ambiguity_flags or []
     async with typing_heartbeat(context, chat_id):
         try:
-            analysis = await analyze_enrichment(
+            analysis, llm_source = await analyze_enrichment(
                 payload,
                 org_context_block=org_block,
                 past_decisions_block=past_block,
@@ -359,6 +402,7 @@ async def _run_llm_pipeline(
         update,
         context,
         analysis,
+        llm_source=llm_source,
         entry=entry,
         payload=payload,
         ambiguity_flags=ambiguity_flags,
@@ -376,9 +420,11 @@ async def process_ioc_pipeline(
     vt: VirusTotalClient = context.bot_data["vt"]
     abuse: AbuseIPDBClient = context.bot_data["abuse"]
     shodan: ShodanClient = context.bot_data["shodan"]
+    urlscan: UrlscanClient = context.bot_data["urlscan"]
+    otx: OTXClient = context.bot_data["otx"]
     data_dir = context.bot_data["data_dir"]
 
-    payload = await build_payload(vt, abuse, shodan, user_text)
+    payload = await build_payload(vt, abuse, shodan, urlscan, otx, user_text)
     prof = _apply_org_profile_to_payload(payload, data_dir, chat_id)
     org_block = build_org_context(data_dir, chat_id)
 
@@ -877,6 +923,8 @@ def main() -> None:
     vt = VirusTotalClient(cfg.virustotal_api_key, timeout=cfg.http_timeout_seconds)
     abuse = AbuseIPDBClient(cfg.abuseipdb_api_key, timeout=cfg.http_timeout_seconds)
     shodan = ShodanClient(cfg.shodan_api_key, timeout=cfg.http_timeout_seconds)
+    urlscan = UrlscanClient(cfg.urlscan_api_key, timeout=cfg.http_timeout_seconds)
+    otx = OTXClient(cfg.otx_api_key, timeout=cfg.http_timeout_seconds)
 
     request = HTTPXRequest(
         connect_timeout=45.0,
@@ -890,6 +938,8 @@ def main() -> None:
     app.bot_data["vt"] = vt
     app.bot_data["abuse"] = abuse
     app.bot_data["shodan"] = shodan
+    app.bot_data["urlscan"] = urlscan
+    app.bot_data["otx"] = otx
     app.bot_data["data_dir"] = cfg.data_dir
     app.bot_data["feedback_pending"] = {}
 

@@ -1,4 +1,11 @@
-"""LLM analysis via Claude (preferred) or OpenAI."""
+"""LLM analysis via Claude (Anthropic) or OpenAI (ChatGPT API).
+
+Which backend runs:
+- If ``ANTHROPIC_API_KEY`` is set (non-empty), **Claude** is used (``CLAUDE_MODEL``, default
+  ``claude-sonnet-4-20250514``).
+- Otherwise **OpenAI** is used (``OPENAI_MODEL``, default ``gpt-4o-mini``) — the same API family
+  as ChatGPT, not the consumer chat UI.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +20,7 @@ load_dotenv()
 SYSTEM_PROMPT = """You are an expert SOC (Security Operations Center) Tier 2 analyst with 10+ years of experience in threat detection, incident response, and threat intelligence.
 
 You receive:
-1. An IOC (Indicator of Compromise) with enrichment data from VirusTotal, AbuseIPDB, and Shodan
+1. An IOC (Indicator of Compromise) with enrichment data from VirusTotal, AbuseIPDB, Shodan, urlscan.io, and AlienVault OTX
 2. Organization context (industry, policies, protected assets) — if available
 3. Past team decisions on similar IOCs — if available
 4. Additional context from the analyst — if this is a follow-up response
@@ -44,6 +51,13 @@ ACTIONABLE RECOMMENDATIONS:
 - If org stack is unknown, give generic but still specific steps.
 
 For firewall or proxy logs, focus assessment on public/routable destinations. Map MITRE only when behaviors support it; use N/A when inappropriate. Do not infer MITRE from vendor signature names alone. Respect test/lab markers and blocked vs successful connections.
+
+ENRICHMENT INTERPRETATION GUIDANCE:
+- VirusTotal: broad multi-engine reputation and tagging; good baseline but may have mixed/lagging signals.
+- AbuseIPDB: crowdsourced abuse reports and IP usage metadata (ISP, usageType, confidence score).
+- Shodan: exposed services, open ports, and known CVEs seen on internet-facing hosts.
+- urlscan.io (domain IOCs): observed page behavior and infrastructure context (final URL, screenshot, server, title, related domains). Useful for phishing/malvertising triage.
+- AlienVault OTX: community pulse context. Higher `pulse_count`, relevant pulse tags, threat actor names, and malware family mentions increase confidence.
 
 Respond in this exact format:
 
@@ -97,8 +111,12 @@ async def analyze_enrichment(
     org_context_block: str = "",
     past_decisions_block: str = "",
     analyst_followup_block: str = "",
-) -> str:
-    """Send enrichment + optional context blocks to Claude or OpenAI."""
+) -> tuple[str, str]:
+    """Send enrichment to the LLM.
+
+    Returns ``(analysis_text, source_label)`` where ``source_label`` identifies the provider
+    and model (for display or logging), e.g. ``"Claude (claude-sonnet-4-20250514)"``.
+    """
     use_anthropic = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
     body = _compose_user_message(
         payload,
@@ -108,15 +126,23 @@ async def analyze_enrichment(
     )
 
     if use_anthropic:
-        return await _analyze_claude(body)
-    return await _analyze_openai(body)
+        model = (os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514") or "").strip()
+        if not model:
+            model = "claude-sonnet-4-20250514"
+        text = await _analyze_claude(body, model=model)
+        return text, f"Claude ({model})"
+
+    model = (os.getenv("OPENAI_MODEL", "gpt-4o-mini") or "").strip()
+    if not model:
+        model = "gpt-4o-mini"
+    text = await _analyze_openai(body, model=model)
+    return text, f"OpenAI ChatGPT API ({model})"
 
 
-async def _analyze_claude(user_content: str) -> str:
+async def _analyze_claude(user_content: str, *, model: str) -> str:
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic()
-    model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
     msg = await client.messages.create(
         model=model,
         max_tokens=4096,
@@ -130,11 +156,10 @@ async def _analyze_claude(user_content: str) -> str:
     return "\n".join(parts).strip() or "(empty model response)"
 
 
-async def _analyze_openai(user_content: str) -> str:
+async def _analyze_openai(user_content: str, *, model: str) -> str:
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI()
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     resp = await client.chat.completions.create(
         model=model,
         messages=[

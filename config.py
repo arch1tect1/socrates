@@ -21,6 +21,8 @@ class Config:
     virustotal_api_key: str
     abuseipdb_api_key: str
     shodan_api_key: str
+    urlscan_api_key: str
+    otx_api_key: str
     anthropic_api_key: str | None
     openai_api_key: str | None
     data_dir: Path
@@ -32,6 +34,8 @@ def load_config() -> Config:
     vt = os.getenv("VIRUSTOTAL_API_KEY", "").strip()
     abuse = os.getenv("ABUSEIPDB_API_KEY", "").strip()
     shodan = os.getenv("SHODAN_API_KEY", "").strip()
+    urlscan = os.getenv("URLSCAN_API_KEY", "").strip()
+    otx = os.getenv("OTX_API_KEY", "").strip()
     anthropic = os.getenv("ANTHROPIC_API_KEY", "").strip() or None
     openai = os.getenv("OPENAI_API_KEY", "").strip() or None
 
@@ -57,6 +61,8 @@ def load_config() -> Config:
         virustotal_api_key=vt,
         abuseipdb_api_key=abuse,
         shodan_api_key=shodan,
+        urlscan_api_key=urlscan,
+        otx_api_key=otx,
         anthropic_api_key=anthropic,
         openai_api_key=openai,
         data_dir=data_dir,
