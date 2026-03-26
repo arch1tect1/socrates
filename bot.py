@@ -765,14 +765,35 @@ def _resolve_setup_state_from_callback(
     context: ContextTypes.DEFAULT_TYPE, update: Update, q
 ) -> tuple[int | None, dict[str, Any] | None]:
     sessions = context.bot_data.get("setup_sessions", {})
-    # Setup is explicitly tracked per chat_id (not per user_id).
-    if q.message and q.message.chat_id is not None:
-        cid = int(q.message.chat_id)
-        return cid, sessions.get(cid)
+    # Setup is tracked per chat_id. Build robust candidate IDs because Telegram callback
+    # payloads can vary across client/message types.
+    candidates: list[int] = []
+    if q.message:
+        try:
+            if getattr(q.message, "chat", None) and q.message.chat.id is not None:
+                candidates.append(int(q.message.chat.id))
+        except Exception:  # noqa: BLE001
+            pass
+        if getattr(q.message, "chat_id", None) is not None:
+            candidates.append(int(q.message.chat_id))
     if update.effective_chat and update.effective_chat.id is not None:
-        cid = int(update.effective_chat.id)
-        return cid, sessions.get(cid)
-    return None, None
+        candidates.append(int(update.effective_chat.id))
+
+    seen: set[int] = set()
+    for cid in candidates:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        st = sessions.get(cid)
+        if st is not None:
+            return cid, st
+
+    # Last-resort fallback: if exactly one setup session exists, use it.
+    # This avoids false "No active setup session" caused by callback chat-id variance.
+    if len(sessions) == 1:
+        cid = next(iter(sessions.keys()))
+        return int(cid), sessions.get(cid)
+    return (candidates[0] if candidates else None), None
 
 
 def _chunk_buttons(
