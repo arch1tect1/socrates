@@ -1292,6 +1292,39 @@ async def handle_dialogue_reply(
     )
 
 
+def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dict[str, Any] | None:
+    """Find active setup session by chat_id, user_id, or disk scan."""
+    chat_id = update.effective_chat.id
+    st = _setup_state(context, chat_id)
+    if st is not None:
+        return st
+    uid = update.effective_user.id if update.effective_user else None
+    if uid and uid != chat_id:
+        st = _setup_state(context, uid)
+        if st is not None:
+            return st
+    sessions = context.bot_data.get("setup_sessions", {})
+    if uid:
+        for st in sessions.values():
+            if isinstance(st, dict) and st.get("owner_user_id") == uid:
+                return st
+    base = context.bot_data["data_dir"] / "setup_sessions"
+    if base.is_dir():
+        for f in base.iterdir():
+            if not f.suffix == ".json":
+                continue
+            try:
+                cid = int(f.stem)
+            except ValueError:
+                continue
+            if cid in sessions:
+                continue
+            loaded = _setup_state(context, cid)
+            if loaded and uid and loaded.get("owner_user_id") == uid:
+                return loaded
+    return None
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg or not msg.text:
@@ -1302,14 +1335,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     data_dir = context.bot_data["data_dir"]
-    setup_st = _setup_state(context, chat_id)
-    logger.info("Setup session state for chat %s: %s", chat_id, setup_st)
 
-    # 1) Setup custom-input capture MUST run first so setup text is never treated as IOC.
+    # --- SETUP SESSION GUARD (highest priority, single block) ---
+    setup_st = _find_setup_state(context, update)
     if setup_st is not None:
         if setup_st.get("awaiting_custom_input"):
             await handle_setup_text_input(update, context, user_text)
             return
+        cfg = _setup_question_config(setup_st["step"])
+        if cfg["type"] == "text":
+            await handle_setup_text_input(update, context, user_text)
+            return
+        await msg.reply_text(
+            "Please select one of the buttons for this setup step, or tap Custom to type."
+        )
+        return
 
     # 2) Dialogue follow-up session.
     sess = get_session(chat_id, data_dir)
@@ -1323,18 +1363,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_feedback_pending_text(update, context, fp, user_text)
         return
 
-    # 4) Setup free-text questions (e.g., org name) before IOC path.
-    if setup_st is not None:
-        cfg = _setup_question_config(setup_st["step"])
-        if cfg["type"] == "text":
-            await handle_setup_text_input(update, context, user_text)
-            return
-        await msg.reply_text(
-            "Please select one of the buttons for this setup step, or tap Custom to type."
-        )
-        return
-
-    # 5) Normal IOC detection and analysis.
+    # 4) Normal IOC detection and analysis.
     await process_ioc_pipeline(update, context, user_text)
 
 
