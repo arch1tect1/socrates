@@ -542,6 +542,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "step": 0,
         "answers": {},
         "pending_custom": None,
+        "awaiting_custom_input": False,
         "multi_selected": [],
         "status": "in_progress",
         "editing_field": None,
@@ -760,6 +761,17 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
     return context.bot_data.get("setup_sessions", {}).get(chat_id)
 
 
+def _chunk_buttons(
+    buttons: list[InlineKeyboardButton], per_row: int = 2
+) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    i = 0
+    while i < len(buttons):
+        rows.append(buttons[i : i + per_row])
+        i += per_row
+    return rows
+
+
 def _setup_question_config(step: int) -> dict[str, Any]:
     cfg: list[dict[str, Any]] = [
         {
@@ -854,18 +866,22 @@ def _setup_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
 
     if cfg["type"] == "single":
         labels = cfg.get("labels") or cfg["options"]
-        row = [
+        buttons = [
             InlineKeyboardButton(lbl, callback_data=f"s:pick:{opt}")
             for opt, lbl in zip(cfg["options"], labels)
         ]
-        row.append(InlineKeyboardButton("Custom", callback_data="s:custom"))
-        return InlineKeyboardMarkup([row])
+        rows = _chunk_buttons(buttons, per_row=2)
+        rows.append([InlineKeyboardButton("Custom", callback_data="s:custom")])
+        return InlineKeyboardMarkup(rows)
 
     selected = set(state.get("multi_selected") or [])
-    rows: list[list[InlineKeyboardButton]] = []
+    buttons: list[InlineKeyboardButton] = []
     for opt in cfg["options"]:
         checked = "✅ " if opt in selected else ""
-        rows.append([InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:toggle:{opt}")])
+        buttons.append(
+            InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:toggle:{opt}")
+        )
+    rows = _chunk_buttons(buttons, per_row=2)
     rows.append([InlineKeyboardButton("Custom", callback_data="s:custom")])
     rows.append([InlineKeyboardButton("Done ✓", callback_data="s:done")])
     return InlineKeyboardMarkup(rows)
@@ -964,9 +980,10 @@ async def handle_setup_text_input(
     cfg = _setup_question_config(state["step"])
     field = cfg["field"]
 
-    pending = state.get("pending_custom")
+    pending = state.get("pending_custom") if state.get("awaiting_custom_input") else None
     if pending:
         state["pending_custom"] = None
+        state["awaiting_custom_input"] = False
         field = pending
         if field == "security_stack":
             existing = list(state["answers"].get(field) or [])
@@ -992,7 +1009,12 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await q.answer()
     if not q.message:
         return
-    chat_id = q.message.chat_id
+    if update.effective_chat and update.effective_chat.id is not None:
+        chat_id = int(update.effective_chat.id)
+    elif q.message and q.message.chat_id is not None:
+        chat_id = int(q.message.chat_id)
+    else:
+        chat_id = int(q.from_user.id)
     state = _setup_state(context, chat_id)
     if not state:
         await q.message.reply_text("No active setup session. Send /setup to begin.")
@@ -1005,11 +1027,13 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         if action == "custom":
             state["pending_custom"] = field
+            state["awaiting_custom_input"] = True
             await q.message.reply_text(cfg.get("custom_prompt", "Type your answer:"))
             return
 
         if action == "pick":
             value = parts[2] if len(parts) > 2 else ""
+            state["awaiting_custom_input"] = False
             if field == "authorized_vpns" and value == "no_vpns":
                 state["answers"][field] = []
             elif field in ("never_block_ips", "own_infrastructure") and value == "skip":
@@ -1037,6 +1061,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if action == "done":
             selected = list(dict.fromkeys(state.get("multi_selected") or []))
             state["multi_selected"] = []
+            state["awaiting_custom_input"] = False
             state["answers"][field] = selected
             await _setup_advance_or_summary(q.message, context, chat_id)
             return
@@ -1055,6 +1080,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["step"] = 0
         state["answers"] = {}
         state["pending_custom"] = None
+        state["awaiting_custom_input"] = False
         state["multi_selected"] = []
         state["status"] = "in_progress"
         state["editing_field"] = None
@@ -1086,6 +1112,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["step"] = SETUP_FIELDS.index(field)
         state["editing_field"] = field
         state["pending_custom"] = None
+        state["awaiting_custom_input"] = False
         state["multi_selected"] = []
         state["status"] = "in_progress"
         await _send_setup_question(q.message, context, chat_id)
@@ -1216,7 +1243,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     setup_st = _setup_state(context, chat_id)
     if setup_st is not None:
         cfg = _setup_question_config(setup_st["step"])
-        if setup_st.get("pending_custom") or cfg["type"] == "text":
+        if setup_st.get("awaiting_custom_input") or cfg["type"] == "text":
             await handle_setup_text_input(update, context, user_text)
             return
 
