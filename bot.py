@@ -799,47 +799,6 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
     return loaded
 
 
-def _resolve_setup_state_from_callback(
-    context: ContextTypes.DEFAULT_TYPE, update: Update, q
-) -> tuple[int | None, dict[str, Any] | None]:
-    # Build candidate chat IDs from all available Telegram callback metadata.
-    candidates: list[int] = []
-    if q.message:
-        try:
-            if getattr(q.message, "chat", None) and q.message.chat.id is not None:
-                candidates.append(int(q.message.chat.id))
-        except Exception:  # noqa: BLE001
-            pass
-        if getattr(q.message, "chat_id", None) is not None:
-            candidates.append(int(q.message.chat_id))
-    if update.effective_chat and update.effective_chat.id is not None:
-        candidates.append(int(update.effective_chat.id))
-
-    # Check each candidate against memory AND disk (via _setup_state which loads from disk).
-    seen: set[int] = set()
-    for cid in candidates:
-        if cid in seen:
-            continue
-        seen.add(cid)
-        st = _setup_state(context, cid)
-        if st is not None:
-            return cid, st
-
-    # Fallback by setup owner user ID if chat metadata is inconsistent.
-    if q.from_user and q.from_user.id is not None:
-        uid = int(q.from_user.id)
-        sessions = context.bot_data.get("setup_sessions", {})
-        for cid, st in sessions.items():
-            if isinstance(st, dict) and st.get("owner_user_id") == uid:
-                return int(cid), st
-
-    # Last-resort fallback: if exactly one setup session exists, use it.
-    sessions = context.bot_data.get("setup_sessions", {})
-    if len(sessions) == 1:
-        cid = next(iter(sessions.keys()))
-        return int(cid), sessions.get(cid)
-    return (candidates[0] if candidates else None), None
-
 
 def _chunk_buttons(
     buttons: list[InlineKeyboardButton], per_row: int = 2
@@ -944,14 +903,16 @@ def _setup_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
     if cfg["type"] == "text":
         return None
 
+    cid = state.get("origin_chat_id", 0)
+
     if cfg["type"] == "single":
         labels = cfg.get("labels") or cfg["options"]
         buttons = [
-            InlineKeyboardButton(lbl, callback_data=f"s:pick:{opt}")
+            InlineKeyboardButton(lbl, callback_data=f"s:{cid}:pick:{opt}")
             for opt, lbl in zip(cfg["options"], labels)
         ]
         rows = _chunk_buttons(buttons, per_row=2)
-        rows.append([InlineKeyboardButton("Custom", callback_data="s:custom")])
+        rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:custom")])
         return InlineKeyboardMarkup(rows)
 
     selected = set(state.get("multi_selected") or [])
@@ -959,11 +920,11 @@ def _setup_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
     for opt in cfg["options"]:
         checked = "✅ " if opt in selected else ""
         buttons.append(
-            InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:toggle:{opt}")
+            InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:{cid}:toggle:{opt}")
         )
     rows = _chunk_buttons(buttons, per_row=2)
-    rows.append([InlineKeyboardButton("Custom", callback_data="s:custom")])
-    rows.append([InlineKeyboardButton("Done ✓", callback_data="s:done")])
+    rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:custom")])
+    rows.append([InlineKeyboardButton("Done ✓", callback_data=f"s:{cid}:done")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1019,13 +980,14 @@ async def _setup_show_summary(msg, context: ContextTypes.DEFAULT_TYPE, chat_id: 
     if not state:
         return
     profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
+    cid = state.get("origin_chat_id", chat_id)
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Confirm ✅", callback_data="s:confirm"),
-                InlineKeyboardButton("Redo 🔄", callback_data="s:redo"),
+                InlineKeyboardButton("Confirm ✅", callback_data=f"s:{cid}:confirm"),
+                InlineKeyboardButton("Redo 🔄", callback_data=f"s:{cid}:redo"),
             ],
-            [InlineKeyboardButton("Edit specific field ✏️", callback_data="s:edit")],
+            [InlineKeyboardButton("Edit specific field ✏️", callback_data=f"s:{cid}:edit")],
         ]
     )
     await msg.reply_html(
@@ -1095,25 +1057,32 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not q or not q.data:
         return
     parts = q.data.split(":")
-    if not parts or parts[0] != "s":
+    # Format: s:<chat_id>:<action>[:<value>]
+    if len(parts) < 3 or parts[0] != "s":
         return
     await q.answer()
     if not q.message:
         return
-    resolved_id, state = _resolve_setup_state_from_callback(context, update, q)
+
+    # Extract chat_id directly from callback data — no guessing needed.
+    try:
+        chat_id = int(parts[1])
+    except (ValueError, IndexError):
+        logger.warning("Malformed setup callback data: %s", q.data)
+        await q.message.reply_text("No active setup session. Send /setup to begin.")
+        return
+
+    state = _setup_state(context, chat_id)
     if not state:
         logger.warning(
-            "Setup callback without active session. callback=%s candidates_chat=%s",
+            "Setup callback without active session. callback=%s chat_id=%s",
             q.data,
-            resolved_id,
+            chat_id,
         )
         await q.message.reply_text("No active setup session. Send /setup to begin.")
         return
 
-    # Always use the chat_id that started /setup for profile storage and session keys.
-    chat_id = int(state.get("origin_chat_id") or resolved_id or 0)
-
-    action = parts[1] if len(parts) > 1 else ""
+    action = parts[2] if len(parts) > 2 else ""
     if action in {"pick", "toggle", "done", "custom"}:
         cfg = _setup_question_config(state["step"])
         field = cfg["field"]
@@ -1126,7 +1095,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         if action == "pick":
-            value = parts[2] if len(parts) > 2 else ""
+            value = parts[3] if len(parts) > 3 else ""
             state["awaiting_custom_input"] = False
             if field == "authorized_vpns" and value == "no_vpns":
                 state["answers"][field] = []
@@ -1139,7 +1108,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         if action == "toggle":
-            value = parts[2] if len(parts) > 2 else ""
+            value = parts[3] if len(parts) > 3 else ""
             selected = set(state.get("multi_selected") or [])
             if field == "cloud_providers" and value == "None":
                 selected = {"None"} if value not in selected else set()
@@ -1194,7 +1163,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 [
                     InlineKeyboardButton(
                         SETUP_LABELS.get(field, field),
-                        callback_data=f"s:editfield:{field}",
+                        callback_data=f"s:{chat_id}:editfield:{field}",
                     )
                 ]
             )
@@ -1204,8 +1173,8 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    if action == "editfield" and len(parts) > 2:
-        field = parts[2]
+    if action == "editfield" and len(parts) > 3:
+        field = parts[3]
         if field not in SETUP_FIELDS:
             await q.message.reply_text("Unknown field.")
             return
