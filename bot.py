@@ -765,22 +765,14 @@ def _resolve_setup_state_from_callback(
     context: ContextTypes.DEFAULT_TYPE, update: Update, q
 ) -> tuple[int | None, dict[str, Any] | None]:
     sessions = context.bot_data.get("setup_sessions", {})
-    candidate_ids: list[int] = []
-    if update.effective_chat and update.effective_chat.id is not None:
-        candidate_ids.append(int(update.effective_chat.id))
+    # Setup is explicitly tracked per chat_id (not per user_id).
     if q.message and q.message.chat_id is not None:
-        candidate_ids.append(int(q.message.chat_id))
-    if q.from_user and q.from_user.id is not None:
-        candidate_ids.append(int(q.from_user.id))
-    seen: set[int] = set()
-    for cid in candidate_ids:
-        if cid in seen:
-            continue
-        seen.add(cid)
-        state = sessions.get(cid)
-        if state is not None:
-            return cid, state
-    return (candidate_ids[0] if candidate_ids else None), None
+        cid = int(q.message.chat_id)
+        return cid, sessions.get(cid)
+    if update.effective_chat and update.effective_chat.id is not None:
+        cid = int(update.effective_chat.id)
+        return cid, sessions.get(cid)
+    return None, None
 
 
 def _chunk_buttons(
