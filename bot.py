@@ -761,6 +761,28 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
     return context.bot_data.get("setup_sessions", {}).get(chat_id)
 
 
+def _resolve_setup_state_from_callback(
+    context: ContextTypes.DEFAULT_TYPE, update: Update, q
+) -> tuple[int | None, dict[str, Any] | None]:
+    sessions = context.bot_data.get("setup_sessions", {})
+    candidate_ids: list[int] = []
+    if update.effective_chat and update.effective_chat.id is not None:
+        candidate_ids.append(int(update.effective_chat.id))
+    if q.message and q.message.chat_id is not None:
+        candidate_ids.append(int(q.message.chat_id))
+    if q.from_user and q.from_user.id is not None:
+        candidate_ids.append(int(q.from_user.id))
+    seen: set[int] = set()
+    for cid in candidate_ids:
+        if cid in seen:
+            continue
+        seen.add(cid)
+        state = sessions.get(cid)
+        if state is not None:
+            return cid, state
+    return (candidate_ids[0] if candidate_ids else None), None
+
+
 def _chunk_buttons(
     buttons: list[InlineKeyboardButton], per_row: int = 2
 ) -> list[list[InlineKeyboardButton]]:
@@ -1014,14 +1036,13 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await q.answer()
     if not q.message:
         return
-    if update.effective_chat and update.effective_chat.id is not None:
-        chat_id = int(update.effective_chat.id)
-    elif q.message and q.message.chat_id is not None:
-        chat_id = int(q.message.chat_id)
-    else:
-        chat_id = int(q.from_user.id)
-    state = _setup_state(context, chat_id)
+    chat_id, state = _resolve_setup_state_from_callback(context, update, q)
     if not state:
+        logger.warning(
+            "Setup callback without active session. callback=%s candidates_chat=%s",
+            q.data,
+            chat_id,
+        )
         await q.message.reply_text("No active setup session. Send /setup to begin.")
         return
 
@@ -1266,6 +1287,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if cfg["type"] == "text":
             await handle_setup_text_input(update, context, user_text)
             return
+        await msg.reply_text(
+            "Please select one of the buttons for this setup step, or tap Custom to type."
+        )
+        return
 
     # 5) Normal IOC detection and analysis.
     await process_ioc_pipeline(update, context, user_text)
