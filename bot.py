@@ -1233,25 +1233,33 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     data_dir = context.bot_data["data_dir"]
 
-    # Must run before /setup, feedback notes, or new IOC detection — otherwise the
-    # analyst's free-text reply is misrouted (e.g. as a profile answer or feedback).
+    # 1) Setup custom-input capture MUST run first so setup text is never treated as IOC.
+    setup_st = _setup_state(context, chat_id)
+    if setup_st is not None:
+        if setup_st.get("awaiting_custom_input"):
+            await handle_setup_text_input(update, context, user_text)
+            return
+
+    # 2) Dialogue follow-up session.
     sess = get_session(chat_id, data_dir)
     if sess and sess.status == "awaiting_followup":
         await handle_dialogue_reply(update, context, sess, user_text)
         return
 
-    setup_st = _setup_state(context, chat_id)
-    if setup_st is not None:
-        cfg = _setup_question_config(setup_st["step"])
-        if setup_st.get("awaiting_custom_input") or cfg["type"] == "text":
-            await handle_setup_text_input(update, context, user_text)
-            return
-
+    # 3) Pending feedback note.
     fp = context.bot_data.get("feedback_pending", {}).get(chat_id)
     if fp:
         await handle_feedback_pending_text(update, context, fp, user_text)
         return
 
+    # 4) Setup free-text questions (e.g., org name) before IOC path.
+    if setup_st is not None:
+        cfg = _setup_question_config(setup_st["step"])
+        if cfg["type"] == "text":
+            await handle_setup_text_input(update, context, user_text)
+            return
+
+    # 5) Normal IOC detection and analysis.
     await process_ioc_pipeline(update, context, user_text)
 
 
