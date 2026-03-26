@@ -540,6 +540,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     sessions = context.bot_data.setdefault("setup_sessions", {})
     sessions[chat_id] = {
+        "origin_chat_id": int(chat_id),
         "owner_user_id": int(update.effective_user.id) if update.effective_user else None,
         "step": 0,
         "answers": {},
@@ -801,9 +802,7 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
 def _resolve_setup_state_from_callback(
     context: ContextTypes.DEFAULT_TYPE, update: Update, q
 ) -> tuple[int | None, dict[str, Any] | None]:
-    sessions = context.bot_data.get("setup_sessions", {})
-    # Setup is tracked per chat_id. Build robust candidate IDs because Telegram callback
-    # payloads can vary across client/message types.
+    # Build candidate chat IDs from all available Telegram callback metadata.
     candidates: list[int] = []
     if q.message:
         try:
@@ -816,24 +815,26 @@ def _resolve_setup_state_from_callback(
     if update.effective_chat and update.effective_chat.id is not None:
         candidates.append(int(update.effective_chat.id))
 
+    # Check each candidate against memory AND disk (via _setup_state which loads from disk).
     seen: set[int] = set()
     for cid in candidates:
         if cid in seen:
             continue
         seen.add(cid)
-        st = sessions.get(cid)
+        st = _setup_state(context, cid)
         if st is not None:
             return cid, st
 
     # Fallback by setup owner user ID if chat metadata is inconsistent.
     if q.from_user and q.from_user.id is not None:
         uid = int(q.from_user.id)
+        sessions = context.bot_data.get("setup_sessions", {})
         for cid, st in sessions.items():
             if isinstance(st, dict) and st.get("owner_user_id") == uid:
                 return int(cid), st
 
     # Last-resort fallback: if exactly one setup session exists, use it.
-    # This avoids false "No active setup session" caused by callback chat-id variance.
+    sessions = context.bot_data.get("setup_sessions", {})
     if len(sessions) == 1:
         cid = next(iter(sessions.keys()))
         return int(cid), sessions.get(cid)
@@ -1099,15 +1100,18 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await q.answer()
     if not q.message:
         return
-    chat_id, state = _resolve_setup_state_from_callback(context, update, q)
+    resolved_id, state = _resolve_setup_state_from_callback(context, update, q)
     if not state:
         logger.warning(
             "Setup callback without active session. callback=%s candidates_chat=%s",
             q.data,
-            chat_id,
+            resolved_id,
         )
         await q.message.reply_text("No active setup session. Send /setup to begin.")
         return
+
+    # Always use the chat_id that started /setup for profile storage and session keys.
+    chat_id = int(state.get("origin_chat_id") or resolved_id or 0)
 
     action = parts[1] if len(parts) > 1 else ""
     if action in {"pick", "toggle", "done", "custom"}:
