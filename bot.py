@@ -536,11 +536,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    context.user_data["setup"] = {"step": 0, "answers": {}}
-    await update.effective_message.reply_text(
-        "What industry is your organization? "
-        "(finance, healthcare, education, government, tech, ecommerce, other)"
-    )
+    chat_id = update.effective_chat.id
+    sessions = context.bot_data.setdefault("setup_sessions", {})
+    sessions[chat_id] = {
+        "step": 0,
+        "answers": {},
+        "pending_custom": None,
+        "multi_selected": [],
+        "status": "in_progress",
+        "editing_field": None,
+    }
+    await _send_setup_question(update.effective_message, context, chat_id)
 
 
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -725,70 +731,364 @@ async def cmd_clearhistory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.effective_message.reply_text(f"Cleared {n} decision file(s).")
 
 
-async def handle_setup_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    st = context.user_data.get("setup")
-    if not st or not update.effective_message:
+SETUP_FIELDS = [
+    "industry",
+    "org_name",
+    "cloud_providers",
+    "tor_policy",
+    "authorized_vpns",
+    "unknown_vpn_policy",
+    "never_block_ips",
+    "own_infrastructure",
+    "security_stack",
+]
+
+SETUP_LABELS = {
+    "industry": "Industry",
+    "org_name": "Organization name",
+    "cloud_providers": "Cloud providers",
+    "tor_policy": "Tor policy",
+    "authorized_vpns": "Authorized VPNs",
+    "unknown_vpn_policy": "Unknown VPN policy",
+    "never_block_ips": "Never-block IPs",
+    "own_infrastructure": "Own infrastructure",
+    "security_stack": "Security stack",
+}
+
+
+def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, Any] | None:
+    return context.bot_data.get("setup_sessions", {}).get(chat_id)
+
+
+def _setup_question_config(step: int) -> dict[str, Any]:
+    cfg: list[dict[str, Any]] = [
+        {
+            "type": "single",
+            "field": "industry",
+            "text": "Question 1/9: Select your industry",
+            "options": ["finance", "healthcare", "education", "government", "tech", "ecommerce"],
+            "labels": ["Finance", "Healthcare", "Education", "Government", "Tech", "Ecommerce"],
+            "custom_prompt": "Type your answer:",
+        },
+        {
+            "type": "text",
+            "field": "org_name",
+            "text": "Question 2/9: What is your organization's name?",
+        },
+        {
+            "type": "multi",
+            "field": "cloud_providers",
+            "text": "Question 3/9: Select cloud providers (multi-select), then tap Done",
+            "options": ["AWS", "Azure", "GCP", "None"],
+            "custom_prompt": "Type your answer:",
+        },
+        {
+            "type": "single",
+            "field": "tor_policy",
+            "text": "Question 4/9: What is your Tor policy?",
+            "options": ["block", "monitor", "allow"],
+            "labels": ["Block", "Monitor", "Allow"],
+            "custom_prompt": "Type your answer:",
+        },
+        {
+            "type": "single",
+            "field": "authorized_vpns",
+            "text": "Question 5/9: Authorized VPNs",
+            "options": ["no_vpns"],
+            "labels": ["No VPNs"],
+            "custom_prompt": "Type your answer:\nList your authorized VPN IP ranges, comma-separated",
+        },
+        {
+            "type": "single",
+            "field": "unknown_vpn_policy",
+            "text": "Question 6/9: Unknown/unauthorized VPN or proxy policy",
+            "options": ["block", "monitor", "allow"],
+            "labels": ["Block", "Monitor", "Allow"],
+            "custom_prompt": "Type your answer:",
+        },
+        {
+            "type": "single",
+            "field": "never_block_ips",
+            "text": "Question 7/9: Never-block IP ranges",
+            "options": ["skip"],
+            "labels": ["Skip"],
+            "custom_prompt": (
+                "Type your answer:\n"
+                "List IP ranges or CIDRs that should never be blocked, comma-separated"
+            ),
+        },
+        {
+            "type": "single",
+            "field": "own_infrastructure",
+            "text": "Question 8/9: Own infrastructure IP ranges",
+            "options": ["skip"],
+            "labels": ["Skip"],
+            "custom_prompt": (
+                "Type your answer:\n"
+                "List your own infrastructure IP ranges, comma-separated"
+            ),
+        },
+        {
+            "type": "multi",
+            "field": "security_stack",
+            "text": "Question 9/9: Select your security stack (multi-select), then tap Done",
+            "options": [
+                "CrowdStrike",
+                "SentinelOne",
+                "Palo Alto",
+                "Fortinet",
+                "Splunk",
+                "Microsoft Sentinel",
+                "Elastic",
+            ],
+            "custom_prompt": "Type your answer:",
+        },
+    ]
+    return cfg[step]
+
+
+def _setup_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    cfg = _setup_question_config(state["step"])
+    if cfg["type"] == "text":
+        return None
+
+    if cfg["type"] == "single":
+        labels = cfg.get("labels") or cfg["options"]
+        row = [
+            InlineKeyboardButton(lbl, callback_data=f"s:pick:{opt}")
+            for opt, lbl in zip(cfg["options"], labels)
+        ]
+        row.append(InlineKeyboardButton("Custom", callback_data="s:custom"))
+        return InlineKeyboardMarkup([row])
+
+    selected = set(state.get("multi_selected") or [])
+    rows: list[list[InlineKeyboardButton]] = []
+    for opt in cfg["options"]:
+        checked = "✅ " if opt in selected else ""
+        rows.append([InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:toggle:{opt}")])
+    rows.append([InlineKeyboardButton("Custom", callback_data="s:custom")])
+    rows.append([InlineKeyboardButton("Done ✓", callback_data="s:done")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_setup_question(
+    msg, context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> None:
+    state = _setup_state(context, chat_id)
+    if not state:
         return
+    cfg = _setup_question_config(state["step"])
+    kb = _setup_keyboard(state)
+    await msg.reply_text(cfg["text"], reply_markup=kb)
+    if cfg["type"] == "text":
+        await msg.reply_text("Type your answer:")
+
+
+def _setup_parse_value(field: str, text: str) -> Any:
+    if field in ("never_block_ips", "own_infrastructure", "authorized_vpns"):
+        return parse_cidr_list(text)
+    if field == "cloud_providers":
+        return parse_cloud_list(text)
+    if field == "security_stack":
+        return parse_cloud_list(text)
+    return text.strip()
+
+
+def _build_profile_from_answers(chat_id: int, answers: dict[str, Any]) -> OrgProfile:
+    return OrgProfile(
+        chat_id=chat_id,
+        industry=str(answers.get("industry", "")),
+        org_name=str(answers.get("org_name", "")),
+        cloud_providers=list(answers.get("cloud_providers") or []),
+        tor_policy=str(answers.get("tor_policy", "")),
+        authorized_vpns=list(answers.get("authorized_vpns") or []),
+        unknown_vpn_policy=str(answers.get("unknown_vpn_policy", "")),
+        never_block_ips=list(answers.get("never_block_ips") or []),
+        own_infrastructure=list(answers.get("own_infrastructure") or []),
+        security_stack=", ".join(answers.get("security_stack") or [])
+        if isinstance(answers.get("security_stack"), list)
+        else str(answers.get("security_stack", "")),
+        custom_policies=[],
+    )
+
+
+async def _setup_show_summary(msg, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    state = _setup_state(context, chat_id)
+    if not state:
+        return
+    profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Confirm ✅", callback_data="s:confirm"),
+                InlineKeyboardButton("Redo 🔄", callback_data="s:redo"),
+            ],
+            [InlineKeyboardButton("Edit specific field ✏️", callback_data="s:edit")],
+        ]
+    )
+    await msg.reply_html(
+        "<b>Setup summary</b>\n\n"
+        + format_profile_summary(profile)
+        + "\n\nConfirm this profile?",
+        reply_markup=kb,
+    )
+
+
+async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    state = _setup_state(context, chat_id)
+    if not state:
+        return
+    if state.get("editing_field"):
+        state["editing_field"] = None
+        state["status"] = "confirm"
+        await _setup_show_summary(msg, context, chat_id)
+        return
+    state["step"] += 1
+    if state["step"] >= len(SETUP_FIELDS):
+        state["status"] = "confirm"
+        await _setup_show_summary(msg, context, chat_id)
+        return
+    await _send_setup_question(msg, context, chat_id)
+
+
+async def handle_setup_text_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
     msg = update.effective_message
-    text = msg.text.strip()
-    step = st["step"]
-    keys = [
-        "industry",
-        "org_name",
-        "cloud_providers",
-        "tor_policy",
-        "authorized_vpns",
-        "unknown_vpn_policy",
-        "never_block_ips",
-        "own_infrastructure",
-        "security_stack",
-    ]
-    key = keys[step]
-    if key == "cloud_providers":
-        st["answers"][key] = parse_cloud_list(text)
-    elif key == "authorized_vpns":
-        st["answers"][key] = parse_cidr_list(text)
-    elif key in ("never_block_ips", "own_infrastructure"):
-        st["answers"][key] = parse_cidr_list(text)
-    else:
-        st["answers"][key] = text
+    if not msg:
+        return
+    chat_id = update.effective_chat.id
+    state = _setup_state(context, chat_id)
+    if not state:
+        return
+    cfg = _setup_question_config(state["step"])
+    field = cfg["field"]
 
-    st["step"] += 1
-    if st["step"] >= len(keys):
-        data_dir = context.bot_data["data_dir"]
-        chat_id = update.effective_chat.id
-        a = st["answers"]
-        profile = OrgProfile(
-            chat_id=chat_id,
-            industry=a.get("industry", ""),
-            org_name=a.get("org_name", ""),
-            cloud_providers=a.get("cloud_providers") or [],
-            tor_policy=a.get("tor_policy", ""),
-            authorized_vpns=a.get("authorized_vpns") or [],
-            unknown_vpn_policy=a.get("unknown_vpn_policy", ""),
-            never_block_ips=a.get("never_block_ips") or [],
-            own_infrastructure=a.get("own_infrastructure") or [],
-            security_stack=a.get("security_stack", ""),
-            custom_policies=[],
-        )
-        save_profile(data_dir, profile)
-        context.user_data.pop("setup", None)
-        await msg.reply_text("Profile saved. Use /profile to view or paste an IOC to analyze.")
+    pending = state.get("pending_custom")
+    if pending:
+        state["pending_custom"] = None
+        field = pending
+        if field == "security_stack":
+            existing = list(state["answers"].get(field) or [])
+            existing.extend([s for s in parse_cloud_list(text) if s])
+            state["answers"][field] = list(dict.fromkeys(existing))
+        else:
+            state["answers"][field] = _setup_parse_value(field, text)
+        await _setup_advance_or_summary(msg, context, chat_id)
         return
 
-    prompts = [
-        "What is your organization's name? (used only for report context)",
-        "What cloud providers do you use? (AWS, Azure, GCP, none, other — comma-separated)",
-        "What is your Tor policy? (block, monitor, allow)",
-        "Do you have authorized VPN connections? (site-to-site, remote access, etc.) "
-        "If yes, list their IP ranges or names, comma-separated. Send 'skip' if none.",
-        "What should I do when I see UNKNOWN/unauthorized VPN or proxy traffic? "
-        "(block, monitor, allow)",
-        "Any IP ranges or CIDRs that should NEVER be blocked? (comma-separated, or 'skip')",
-        "Any IP ranges that are your own infrastructure? (comma-separated, or 'skip')",
-        "What EDR/firewall/SIEM do you use? (free text, or 'skip')",
-    ]
-    await msg.reply_text(prompts[st["step"] - 1])
+    if cfg["type"] == "text":
+        state["answers"][field] = text.strip()
+        await _setup_advance_or_summary(msg, context, chat_id)
+
+
+async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    parts = q.data.split(":")
+    if not parts or parts[0] != "s":
+        return
+    await q.answer()
+    if not q.message:
+        return
+    chat_id = q.message.chat_id
+    state = _setup_state(context, chat_id)
+    if not state:
+        await q.message.reply_text("No active setup session. Send /setup to begin.")
+        return
+
+    action = parts[1] if len(parts) > 1 else ""
+    if action in {"pick", "toggle", "done", "custom"}:
+        cfg = _setup_question_config(state["step"])
+        field = cfg["field"]
+
+        if action == "custom":
+            state["pending_custom"] = field
+            await q.message.reply_text(cfg.get("custom_prompt", "Type your answer:"))
+            return
+
+        if action == "pick":
+            value = parts[2] if len(parts) > 2 else ""
+            if field == "authorized_vpns" and value == "no_vpns":
+                state["answers"][field] = []
+            elif field in ("never_block_ips", "own_infrastructure") and value == "skip":
+                state["answers"][field] = []
+            else:
+                state["answers"][field] = value
+            await _setup_advance_or_summary(q.message, context, chat_id)
+            return
+
+        if action == "toggle":
+            value = parts[2] if len(parts) > 2 else ""
+            selected = set(state.get("multi_selected") or [])
+            if field == "cloud_providers" and value == "None":
+                selected = {"None"} if value not in selected else set()
+            else:
+                selected.discard("None")
+                if value in selected:
+                    selected.remove(value)
+                else:
+                    selected.add(value)
+            state["multi_selected"] = list(selected)
+            await _send_setup_question(q.message, context, chat_id)
+            return
+
+        if action == "done":
+            selected = list(dict.fromkeys(state.get("multi_selected") or []))
+            state["multi_selected"] = []
+            state["answers"][field] = selected
+            await _setup_advance_or_summary(q.message, context, chat_id)
+            return
+
+    if action == "confirm":
+        data_dir = context.bot_data["data_dir"]
+        profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
+        save_profile(data_dir, profile)
+        context.bot_data.get("setup_sessions", {}).pop(chat_id, None)
+        await q.message.reply_text(
+            "Profile saved. Use /profile to view or paste an IOC to analyze."
+        )
+        return
+
+    if action == "redo":
+        state["step"] = 0
+        state["answers"] = {}
+        state["pending_custom"] = None
+        state["multi_selected"] = []
+        state["status"] = "in_progress"
+        state["editing_field"] = None
+        await _send_setup_question(q.message, context, chat_id)
+        return
+
+    if action == "edit":
+        rows = []
+        for field in SETUP_FIELDS:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        SETUP_LABELS.get(field, field),
+                        callback_data=f"s:editfield:{field}",
+                    )
+                ]
+            )
+        await q.message.reply_text(
+            "Choose a field to edit:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if action == "editfield" and len(parts) > 2:
+        field = parts[2]
+        if field not in SETUP_FIELDS:
+            await q.message.reply_text("Unknown field.")
+            return
+        state["step"] = SETUP_FIELDS.index(field)
+        state["editing_field"] = field
+        state["pending_custom"] = None
+        state["multi_selected"] = []
+        state["status"] = "in_progress"
+        await _send_setup_question(q.message, context, chat_id)
 
 
 async def handle_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -913,9 +1213,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await handle_dialogue_reply(update, context, sess, user_text)
         return
 
-    if context.user_data.get("setup") is not None:
-        await handle_setup_step(update, context)
-        return
+    setup_st = _setup_state(context, chat_id)
+    if setup_st is not None:
+        cfg = _setup_question_config(setup_st["step"])
+        if setup_st.get("pending_custom") or cfg["type"] == "text":
+            await handle_setup_text_input(update, context, user_text)
+            return
 
     fp = context.bot_data.get("feedback_pending", {}).get(chat_id)
     if fp:
@@ -949,6 +1252,7 @@ def main() -> None:
     app.bot_data["otx"] = otx
     app.bot_data["data_dir"] = cfg.data_dir
     app.bot_data["feedback_pending"] = {}
+    app.bot_data["setup_sessions"] = {}
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
@@ -961,6 +1265,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("clearhistory", cmd_clearhistory))
+    app.add_handler(CallbackQueryHandler(handle_setup_callback, pattern=r"^s:"))
     app.add_handler(CallbackQueryHandler(handle_feedback_callback, pattern=r"^f:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
