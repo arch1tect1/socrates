@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import csv
 import io
+import json
 import logging
 import uuid
 from typing import Any
@@ -548,6 +549,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "status": "in_progress",
         "editing_field": None,
     }
+    _setup_save_state(context, chat_id, sessions[chat_id])
     await _send_setup_question(update.effective_message, context, chat_id)
 
 
@@ -758,8 +760,42 @@ SETUP_LABELS = {
 }
 
 
+def _setup_session_path(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    data_dir = context.bot_data["data_dir"]
+    base = data_dir / "setup_sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{chat_id}.json"
+
+
+def _setup_save_state(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, state: dict[str, Any]
+) -> None:
+    context.bot_data.setdefault("setup_sessions", {})[chat_id] = state
+    path = _setup_session_path(context, chat_id)
+    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _setup_clear_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    context.bot_data.get("setup_sessions", {}).pop(chat_id, None)
+    path = _setup_session_path(context, chat_id)
+    path.unlink(missing_ok=True)
+
+
 def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, Any] | None:
-    return context.bot_data.get("setup_sessions", {}).get(chat_id)
+    mem = context.bot_data.get("setup_sessions", {}).get(chat_id)
+    if mem is not None:
+        return mem
+    path = _setup_session_path(context, chat_id)
+    if not path.is_file():
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    context.bot_data.setdefault("setup_sessions", {})[chat_id] = loaded
+    return loaded
 
 
 def _resolve_setup_state_from_callback(
@@ -942,6 +978,7 @@ async def _send_setup_question(
         state["awaiting_custom_input"] = True
     elif not state.get("pending_custom"):
         state["awaiting_custom_input"] = False
+    _setup_save_state(context, chat_id, state)
     kb = _setup_keyboard(state)
     await msg.reply_text(cfg["text"], reply_markup=kb)
     if cfg["type"] == "text":
@@ -1005,13 +1042,16 @@ async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, cha
     if state.get("editing_field"):
         state["editing_field"] = None
         state["status"] = "confirm"
+        _setup_save_state(context, chat_id, state)
         await _setup_show_summary(msg, context, chat_id)
         return
     state["step"] += 1
     if state["step"] >= len(SETUP_FIELDS):
         state["status"] = "confirm"
+        _setup_save_state(context, chat_id, state)
         await _setup_show_summary(msg, context, chat_id)
         return
+    _setup_save_state(context, chat_id, state)
     await _send_setup_question(msg, context, chat_id)
 
 
@@ -1039,11 +1079,13 @@ async def handle_setup_text_input(
             state["answers"][field] = list(dict.fromkeys(existing))
         else:
             state["answers"][field] = _setup_parse_value(field, text)
+        _setup_save_state(context, chat_id, state)
         await _setup_advance_or_summary(msg, context, chat_id)
         return
 
     if cfg["type"] == "text":
         state["answers"][field] = text.strip()
+        _setup_save_state(context, chat_id, state)
         await _setup_advance_or_summary(msg, context, chat_id)
 
 
@@ -1075,6 +1117,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if action == "custom":
             state["pending_custom"] = field
             state["awaiting_custom_input"] = True
+            _setup_save_state(context, chat_id, state)
             await q.message.reply_text(cfg.get("custom_prompt", "Type your answer:"))
             return
 
@@ -1087,6 +1130,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 state["answers"][field] = []
             else:
                 state["answers"][field] = value
+            _setup_save_state(context, chat_id, state)
             await _setup_advance_or_summary(q.message, context, chat_id)
             return
 
@@ -1102,6 +1146,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 else:
                     selected.add(value)
             state["multi_selected"] = list(selected)
+            _setup_save_state(context, chat_id, state)
             updated_kb = _setup_keyboard(state)
             if updated_kb is not None:
                 await q.edit_message_reply_markup(reply_markup=updated_kb)
@@ -1112,6 +1157,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             state["multi_selected"] = []
             state["awaiting_custom_input"] = False
             state["answers"][field] = selected
+            _setup_save_state(context, chat_id, state)
             await _setup_advance_or_summary(q.message, context, chat_id)
             return
 
@@ -1119,7 +1165,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         data_dir = context.bot_data["data_dir"]
         profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
         save_profile(data_dir, profile)
-        context.bot_data.get("setup_sessions", {}).pop(chat_id, None)
+        _setup_clear_state(context, chat_id)
         await q.message.reply_text(
             "Profile saved. Use /profile to view or paste an IOC to analyze."
         )
@@ -1133,6 +1179,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["multi_selected"] = []
         state["status"] = "in_progress"
         state["editing_field"] = None
+        _setup_save_state(context, chat_id, state)
         await _send_setup_question(q.message, context, chat_id)
         return
 
@@ -1164,6 +1211,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["awaiting_custom_input"] = False
         state["multi_selected"] = []
         state["status"] = "in_progress"
+        _setup_save_state(context, chat_id, state)
         await _send_setup_question(q.message, context, chat_id)
 
 
