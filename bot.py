@@ -1060,7 +1060,9 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 else:
                     selected.add(value)
             state["multi_selected"] = list(selected)
-            await _send_setup_question(q.message, context, chat_id)
+            updated_kb = _setup_keyboard(state)
+            if updated_kb is not None:
+                await q.edit_message_reply_markup(reply_markup=updated_kb)
             return
 
         if action == "done":
