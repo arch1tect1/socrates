@@ -894,6 +894,11 @@ async def _send_setup_question(
     if not state:
         return
     cfg = _setup_question_config(state["step"])
+    # Free-text-only steps must explicitly expect the next text message.
+    if cfg["type"] == "text":
+        state["awaiting_custom_input"] = True
+    elif not state.get("pending_custom"):
+        state["awaiting_custom_input"] = False
     kb = _setup_keyboard(state)
     await msg.reply_text(cfg["text"], reply_markup=kb)
     if cfg["type"] == "text":
@@ -1232,9 +1237,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     data_dir = context.bot_data["data_dir"]
+    setup_st = _setup_state(context, chat_id)
+    logger.info("Setup session state for chat %s: %s", chat_id, setup_st)
 
     # 1) Setup custom-input capture MUST run first so setup text is never treated as IOC.
-    setup_st = _setup_state(context, chat_id)
     if setup_st is not None:
         if setup_st.get("awaiting_custom_input"):
             await handle_setup_text_input(update, context, user_text)
