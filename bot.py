@@ -539,6 +539,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     sessions = context.bot_data.setdefault("setup_sessions", {})
     sessions[chat_id] = {
+        "owner_user_id": int(update.effective_user.id) if update.effective_user else None,
         "step": 0,
         "answers": {},
         "pending_custom": None,
@@ -787,6 +788,13 @@ def _resolve_setup_state_from_callback(
         st = sessions.get(cid)
         if st is not None:
             return cid, st
+
+    # Fallback by setup owner user ID if chat metadata is inconsistent.
+    if q.from_user and q.from_user.id is not None:
+        uid = int(q.from_user.id)
+        for cid, st in sessions.items():
+            if isinstance(st, dict) and st.get("owner_user_id") == uid:
+                return int(cid), st
 
     # Last-resort fallback: if exactly one setup session exists, use it.
     # This avoids false "No active setup session" caused by callback chat-id variance.
