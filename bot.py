@@ -538,8 +538,9 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     chat_id = update.effective_chat.id
-    sessions = context.bot_data.setdefault("setup_sessions", {})
-    sessions[chat_id] = {
+    # Clear any stale session files for this chat so old disk state never bleeds in.
+    _setup_clear_state(context, chat_id)
+    new_state = {
         "origin_chat_id": int(chat_id),
         "owner_user_id": int(update.effective_user.id) if update.effective_user else None,
         "step": 0,
@@ -550,7 +551,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "status": "in_progress",
         "editing_field": None,
     }
-    _setup_save_state(context, chat_id, sessions[chat_id])
+    _setup_save_state(context, chat_id, new_state)
     await _send_setup_question(update.effective_message, context, chat_id)
 
 
@@ -771,8 +772,9 @@ def _setup_session_path(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 def _setup_save_state(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, state: dict[str, Any]
 ) -> None:
-    # Always keep origin_chat_id in sync with the actual storage key.
-    state["origin_chat_id"] = chat_id
+    # Only set origin_chat_id once — never overwrite after the session is created.
+    if not state.get("origin_chat_id"):
+        state["origin_chat_id"] = chat_id
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = state
     path = _setup_session_path(context, chat_id)
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -1135,16 +1137,21 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state is None or chat_id is None:
         logger.warning("Setup callback: no active session found. data=%s", q.data)
-        # Show a brief popup — do NOT clutter the chat with an error message.
         await q.answer("No active setup session. Send /setup to begin.", show_alert=True)
         return
+
+    # Always use origin_chat_id as the authoritative storage key so the session
+    # never migrates to a different key when callbacks resolve via fallback strategies.
+    chat_id = int(state.get("origin_chat_id") or chat_id)
 
     # Determine action/value offset based on format:
     # New: s:<chat_id>:<action>[:<value>]  → action at index 2, value at index 3
     # Old: s:<action>[:<value>]            → action at index 1, value at index 2
+    # Detect by checking whether parts[1] is a digit string (not an action keyword).
+    _action_keywords = {"pick", "toggle", "done", "custom", "confirm", "redo", "edit", "editfield"}
     try:
-        _is_new_fmt = bool(int(parts[1]))
-    except (ValueError, IndexError):
+        _is_new_fmt = parts[1].lstrip("-").isdigit() and parts[1] not in _action_keywords
+    except IndexError:
         _is_new_fmt = False
     _act_idx = 2 if _is_new_fmt else 1
     _val_idx = 3 if _is_new_fmt else 2
