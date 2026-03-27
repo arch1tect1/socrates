@@ -1201,11 +1201,17 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 state = st
                 break
 
-    # Strategy 3: Scan all in-memory sessions by owner_user_id.
+    callback_chat_id = q.message.chat_id if q.message else None
+
+    # Strategy 3: Scan all in-memory sessions by owner_user_id, but only for this chat.
     if state is None and q.from_user:
         uid = q.from_user.id
         for cid_key, st in context.bot_data.get("setup_sessions", {}).items():
-            if isinstance(st, dict) and st.get("owner_user_id") == uid:
+            if (
+                isinstance(st, dict)
+                and st.get("owner_user_id") == uid
+                and int(st.get("origin_chat_id") or cid_key) == int(callback_chat_id or 0)
+            ):
                 chat_id = int(cid_key)
                 state = st
                 break
