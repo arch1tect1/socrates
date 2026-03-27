@@ -467,11 +467,15 @@ async def process_ioc_pipeline(
         )
         put_session(sess, data_dir)
         qtext = "\n".join(f"• {q}" for q in questions)
+        total_q = len(questions)
+        first_q = questions[0] if questions else "Please share any relevant context."
         if msg:
             await msg.reply_html(
                 f"{prelim}\n\n"
                 f"❓ <b>More context needed</b> before a final verdict:\n\n{qtext}\n\n"
-                f"Reply with your answers, or send /skip for a best-effort verdict.",
+                f"Please answer them one by one. Start with question 1/{total_q}:\n"
+                f"{first_q}\n\n"
+                f"Send /skip any time for a best-effort verdict.",
             )
         return
 
@@ -1362,7 +1366,24 @@ async def handle_dialogue_reply(
 ) -> None:
     chat_id = update.effective_chat.id
     data_dir = context.bot_data["data_dir"]
-    sess.analyst_responses.append(text)
+    answer = text.strip()
+    if not answer:
+        if update.effective_message:
+            await update.effective_message.reply_text("Please send an answer or /skip.")
+        return
+
+    sess.analyst_responses.append(answer)
+    answered = len(sess.analyst_responses)
+    total = len(sess.followup_questions)
+    if answered < total:
+        put_session(sess, data_dir)
+        next_q = sess.followup_questions[answered]
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                f"Thanks. Question {answered + 1}/{total}: {next_q}"
+            )
+        return
+
     org_block = build_org_context(data_dir, chat_id)
     entry = sess.enrichment_data
     past_block = ""
@@ -1376,11 +1397,15 @@ async def handle_dialogue_reply(
         )
         past_block = format_past_decisions_for_llm(sim)
     flags_str = ", ".join(sess.ambiguity_flags)
-    ans = " | ".join(sess.analyst_responses)
+    qa_pairs = []
+    for idx, question in enumerate(sess.followup_questions):
+        response = sess.analyst_responses[idx] if idx < len(sess.analyst_responses) else ""
+        qa_pairs.append(f"Q{idx + 1}: {question}\nA{idx + 1}: {response}")
+    ans = "\n".join(qa_pairs)
     follow = (
         "ANALYST PROVIDED ADDITIONAL CONTEXT:\n"
         f"- Ambiguity detected: {flags_str}\n"
-        f"- Analyst responses: {ans}\n"
+        f"{ans}\n"
         "Given this context and enrichment, give a SPECIFIC, ACTIONABLE verdict."
     )
     clear_session(chat_id, data_dir)
