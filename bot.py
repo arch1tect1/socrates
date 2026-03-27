@@ -852,6 +852,8 @@ def _setup_clear_user_sessions(
 def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, Any] | None:
     mem = context.bot_data.get("setup_sessions", {}).get(chat_id)
     if mem is not None:
+        if mem.get("pending_custom"):
+            mem["awaiting_custom_input"] = True
         return mem
     path = _setup_session_path(context, chat_id)
     if not path.is_file():
@@ -865,6 +867,8 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
     # Clear stale editing state that may have been persisted before a bot restart.
     if loaded.get("editing_field") and loaded.get("status") != "editing":
         loaded["editing_field"] = None
+    if loaded.get("pending_custom"):
+        loaded["awaiting_custom_input"] = True
     # Ensure origin_chat_id is always a valid int (could be null/missing in old files).
     if not loaded.get("origin_chat_id"):
         loaded["origin_chat_id"] = chat_id
@@ -1125,7 +1129,7 @@ async def handle_setup_text_input(
     cfg = _setup_question_config(state["step"])
     field = cfg["field"]
 
-    pending = state.get("pending_custom") if state.get("awaiting_custom_input") else None
+    pending = state.get("pending_custom")
     if pending:
         state["pending_custom"] = None
         state["awaiting_custom_input"] = False
@@ -1557,7 +1561,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # In that state text is not part of the wizard — let it through to IOC pipeline.
         if status == "confirm" or step >= len(SETUP_FIELDS):
             pass  # fall through to IOC / dialogue handling below
-        elif setup_st.get("awaiting_custom_input"):
+        elif setup_st.get("awaiting_custom_input") or setup_st.get("pending_custom"):
             await handle_setup_text_input(update, context, user_text, state=setup_st)
             return
         else:
