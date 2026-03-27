@@ -560,8 +560,24 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
+    uid = update.effective_user.id if update.effective_user else None
     p = load_profile(data_dir, chat_id)
+    # Fallback: if user_id differs from chat_id (e.g. group vs. private), try user_id too.
+    if p is None and uid and uid != chat_id:
+        p = load_profile(data_dir, uid)
+    # Last-resort: scan profiles directory for a profile whose chat_id field matches.
+    if p is None:
+        profiles_dir = data_dir / "profiles"
+        if profiles_dir.is_dir():
+            for pf in profiles_dir.iterdir():
+                if pf.suffix == ".json":
+                    candidate = load_profile(data_dir, int(pf.stem)) if pf.stem.lstrip("-").isdigit() else None
+                    if candidate and (candidate.chat_id in (chat_id, uid)):
+                        p = candidate
+                        logger.info("cmd_profile: found profile via scan at %s", pf)
+                        break
     if not p:
+        logger.warning("cmd_profile: no profile found for chat_id=%s uid=%s", chat_id, uid)
         await update.effective_message.reply_text("No profile yet. Use /setup.")
         return
     await update.effective_message.reply_html(format_profile_summary(p))
@@ -990,7 +1006,7 @@ async def _setup_show_summary(msg, context: ContextTypes.DEFAULT_TYPE, chat_id: 
     if not state:
         return
     profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
-    cid = state.get("origin_chat_id", chat_id)
+    cid = int(state.get("origin_chat_id") or chat_id)  # never None/0
     kb = InlineKeyboardMarkup(
         [
             [
@@ -1137,7 +1153,8 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state is None or chat_id is None:
         logger.warning("Setup callback: no active session found. data=%s", q.data)
-        await q.answer("No active setup session. Send /setup to begin.", show_alert=True)
+        # Use show_alert=False so the brief toast never blocks subsequent button clicks.
+        await q.answer("Session expired. Send /setup to begin.", show_alert=False)
         return
 
     # Always use origin_chat_id as the authoritative storage key so the session
