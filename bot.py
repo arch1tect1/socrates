@@ -1024,15 +1024,22 @@ async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, cha
 
 
 async def handle_setup_text_input(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    state: dict[str, Any] | None = None,
 ) -> None:
     msg = update.effective_message
     if not msg:
         return
-    chat_id = update.effective_chat.id
-    state = _setup_state(context, chat_id)
-    if not state:
-        return
+    # Use the passed-in state (already found by caller) to avoid a second lookup
+    # that might use a different chat_id key and silently miss.
+    if state is None:
+        chat_id = update.effective_chat.id
+        state = _setup_state(context, chat_id)
+        if not state:
+            return
+    chat_id = int(state.get("origin_chat_id") or update.effective_chat.id)
     cfg = _setup_question_config(state["step"])
     field = cfg["field"]
 
@@ -1070,11 +1077,15 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # Extract chat_id directly from callback data — no guessing needed.
+    # Old buttons (pre-format-change) have format s:<action>[:<value>] where parts[1] is
+    # not an integer. Detect this and ask the user to restart setup.
     try:
         chat_id = int(parts[1])
     except (ValueError, IndexError):
-        logger.warning("Malformed setup callback data: %s", q.data)
-        await q.message.reply_text("No active setup session. Send /setup to begin.")
+        logger.warning("Old-format setup callback button clicked: %s", q.data)
+        await q.message.reply_text(
+            "These buttons are outdated. Please run /setup again to get fresh ones."
+        )
         return
 
     state = _setup_state(context, chat_id)
@@ -1345,11 +1356,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     setup_st = _find_setup_state(context, update)
     if setup_st is not None:
         if setup_st.get("awaiting_custom_input"):
-            await handle_setup_text_input(update, context, user_text)
+            await handle_setup_text_input(update, context, user_text, state=setup_st)
             return
         cfg = _setup_question_config(setup_st["step"])
         if cfg["type"] == "text":
-            await handle_setup_text_input(update, context, user_text)
+            await handle_setup_text_input(update, context, user_text, state=setup_st)
             return
         await msg.reply_text(
             "Please select one of the buttons for this setup step, or tap Custom to type."
