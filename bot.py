@@ -795,6 +795,9 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
         return None
     if not isinstance(loaded, dict):
         return None
+    # Clear stale editing state that may have been persisted before a bot restart.
+    if loaded.get("editing_field") and loaded.get("status") != "editing":
+        loaded["editing_field"] = None
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = loaded
     return loaded
 
@@ -1002,7 +1005,9 @@ async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, cha
     state = _setup_state(context, chat_id)
     if not state:
         return
-    if state.get("editing_field"):
+    # Only return to summary when BOTH editing_field is set AND we are in an active edit sub-flow.
+    # This prevents stale persisted editing_field from triggering premature summary.
+    if state.get("editing_field") and state.get("status") == "editing":
         state["editing_field"] = None
         state["status"] = "confirm"
         _setup_save_state(context, chat_id, state)
@@ -1183,7 +1188,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["pending_custom"] = None
         state["awaiting_custom_input"] = False
         state["multi_selected"] = []
-        state["status"] = "in_progress"
+        state["status"] = "editing"
         _setup_save_state(context, chat_id, state)
         await _send_setup_question(q.message, context, chat_id)
 
@@ -1381,7 +1386,7 @@ def main() -> None:
         write_timeout=45.0,
         pool_timeout=10.0,
     )
-    app = Application.builder().token(cfg.telegram_bot_token).request(request).build()
+    app = Application.builder().token(cfg.telegram_bot_token).request(request).concurrent_updates(False).build()
 
     app.bot_data["config"] = cfg
     app.bot_data["vt"] = vt
