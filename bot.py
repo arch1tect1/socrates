@@ -771,6 +771,8 @@ def _setup_session_path(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 def _setup_save_state(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, state: dict[str, Any]
 ) -> None:
+    # Always keep origin_chat_id in sync with the actual storage key.
+    state["origin_chat_id"] = chat_id
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = state
     path = _setup_session_path(context, chat_id)
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -798,6 +800,9 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
     # Clear stale editing state that may have been persisted before a bot restart.
     if loaded.get("editing_field") and loaded.get("status") != "editing":
         loaded["editing_field"] = None
+    # Ensure origin_chat_id is always a valid int (could be null/missing in old files).
+    if not loaded.get("origin_chat_id"):
+        loaded["origin_chat_id"] = chat_id
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = loaded
     return loaded
 
@@ -901,12 +906,12 @@ def _setup_question_config(step: int) -> dict[str, Any]:
     return cfg[step]
 
 
-def _setup_keyboard(state: dict[str, Any]) -> InlineKeyboardMarkup | None:
+def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup | None:
     cfg = _setup_question_config(state["step"])
     if cfg["type"] == "text":
         return None
 
-    cid = state.get("origin_chat_id", 0)
+    cid = chat_id  # always use the authoritative chat_id, never rely on state field
 
     if cfg["type"] == "single":
         labels = cfg.get("labels") or cfg["options"]
@@ -944,7 +949,7 @@ async def _send_setup_question(
     elif not state.get("pending_custom"):
         state["awaiting_custom_input"] = False
     _setup_save_state(context, chat_id, state)
-    kb = _setup_keyboard(state)
+    kb = _setup_keyboard(state, chat_id)
     await msg.reply_text(cfg["text"], reply_markup=kb)
     if cfg["type"] == "text":
         await msg.reply_text("Type your answer:")
@@ -1136,7 +1141,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     selected.add(value)
             state["multi_selected"] = list(selected)
             _setup_save_state(context, chat_id, state)
-            updated_kb = _setup_keyboard(state)
+            updated_kb = _setup_keyboard(state, chat_id)
             if updated_kb is not None:
                 await q.edit_message_reply_markup(reply_markup=updated_kb)
             return
