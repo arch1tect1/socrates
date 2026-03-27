@@ -1405,18 +1405,41 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # --- SETUP SESSION GUARD (highest priority, single block) ---
     setup_st = _find_setup_state(context, update)
+    logger.info(
+        "on_text chat=%s text=%r setup_found=%s step=%s status=%s awaiting=%s",
+        chat_id,
+        user_text[:30],
+        setup_st is not None,
+        setup_st.get("step") if setup_st else None,
+        setup_st.get("status") if setup_st else None,
+        setup_st.get("awaiting_custom_input") if setup_st else None,
+    )
     if setup_st is not None:
-        if setup_st.get("awaiting_custom_input"):
+        step = setup_st.get("step", 0)
+        status = setup_st.get("status", "in_progress")
+        # If the wizard reached the summary/confirm screen, step == len(SETUP_FIELDS).
+        # In that state text is not part of the wizard — let it through to IOC pipeline.
+        if status == "confirm" or step >= len(SETUP_FIELDS):
+            pass  # fall through to IOC / dialogue handling below
+        elif setup_st.get("awaiting_custom_input"):
             await handle_setup_text_input(update, context, user_text, state=setup_st)
             return
-        cfg = _setup_question_config(setup_st["step"])
-        if cfg["type"] == "text":
-            await handle_setup_text_input(update, context, user_text, state=setup_st)
-            return
-        await msg.reply_text(
-            "Please select one of the buttons for this setup step, or tap Custom to type."
-        )
-        return
+        else:
+            try:
+                cfg = _setup_question_config(step)
+            except (IndexError, KeyError):
+                logger.error("on_text: invalid setup step %s, clearing session", step)
+                origin = int(setup_st.get("origin_chat_id") or chat_id)
+                _setup_clear_state(context, origin)
+                # fall through to IOC handling
+            else:
+                if cfg["type"] == "text":
+                    await handle_setup_text_input(update, context, user_text, state=setup_st)
+                    return
+                await msg.reply_text(
+                    "Please select one of the buttons for this setup step, or tap Custom to type."
+                )
+                return
 
     # 2) Dialogue follow-up session.
     sess = get_session(chat_id, data_dir)
