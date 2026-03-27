@@ -1161,6 +1161,8 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     # never migrates to a different key when callbacks resolve via fallback strategies.
     chat_id = int(state.get("origin_chat_id") or chat_id)
 
+    session_status = state.get("status", "in_progress")
+
     # Determine action/value offset based on format:
     # New: s:<chat_id>:<action>[:<value>]  → action at index 2, value at index 3
     # Old: s:<action>[:<value>]            → action at index 1, value at index 2
@@ -1174,6 +1176,18 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     _val_idx = 3 if _is_new_fmt else 2
 
     action = parts[_act_idx] if len(parts) > _act_idx else ""
+
+    # Guard: stale wizard-step callbacks must not fire when the session is at the
+    # summary/confirm stage, and a stale confirm must not fire on an in-progress session.
+    if action in {"pick", "toggle", "done", "custom"} and session_status == "confirm":
+        logger.warning("Stale wizard callback %s on confirm-stage session, ignoring", action)
+        await q.answer("Setup already complete. Confirm or Redo.", show_alert=False)
+        return
+    if action == "confirm" and session_status != "confirm":
+        logger.warning("Stale confirm callback on non-confirm session (status=%s), ignoring", session_status)
+        await q.answer("", show_alert=False)
+        return
+
     if action in {"pick", "toggle", "done", "custom"}:
         cfg = _setup_question_config(state["step"])
         field = cfg["field"]
