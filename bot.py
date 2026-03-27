@@ -542,11 +542,13 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     chat_id = update.effective_chat.id
+    owner_user_id = int(update.effective_user.id) if update.effective_user else None
     # Clear any stale session files for this chat so old disk state never bleeds in.
     _setup_clear_state(context, chat_id)
+    _setup_clear_user_sessions(context, owner_user_id, keep_chat_id=chat_id)
     new_state = {
         "origin_chat_id": int(chat_id),
-        "owner_user_id": int(update.effective_user.id) if update.effective_user else None,
+        "owner_user_id": owner_user_id,
         "step": 0,
         "answers": {},
         "pending_custom": None,
@@ -554,6 +556,7 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "multi_selected": [],
         "status": "in_progress",
         "editing_field": None,
+        "last_prompt_signature": None,
     }
     _setup_save_state(context, chat_id, new_state)
     await _send_setup_question(update.effective_message, context, chat_id)
@@ -806,6 +809,46 @@ def _setup_clear_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
     path.unlink(missing_ok=True)
 
 
+def _setup_clear_user_sessions(
+    context: ContextTypes.DEFAULT_TYPE, owner_user_id: int | None, keep_chat_id: int | None = None
+) -> None:
+    if not owner_user_id:
+        return
+    sessions = context.bot_data.get("setup_sessions", {})
+    to_remove: list[int] = []
+    for cid, state in sessions.items():
+        if not isinstance(state, dict):
+            continue
+        if state.get("owner_user_id") != owner_user_id:
+            continue
+        origin_cid = int(state.get("origin_chat_id") or cid)
+        if keep_chat_id is not None and origin_cid == keep_chat_id:
+            continue
+        to_remove.append(int(cid))
+    for cid in to_remove:
+        _setup_clear_state(context, cid)
+
+    base = context.bot_data["data_dir"] / "setup_sessions"
+    if not base.is_dir():
+        return
+    for path in base.glob("*.json"):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        if loaded.get("owner_user_id") != owner_user_id:
+            continue
+        try:
+            origin_cid = int(loaded.get("origin_chat_id") or path.stem)
+        except ValueError:
+            origin_cid = 0
+        if keep_chat_id is not None and origin_cid == keep_chat_id:
+            continue
+        path.unlink(missing_ok=True)
+
+
 def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, Any] | None:
     mem = context.bot_data.get("setup_sessions", {}).get(chat_id)
     if mem is not None:
@@ -965,11 +1008,20 @@ async def _send_setup_question(
     if not state:
         return
     cfg = _setup_question_config(state["step"])
+    prompt_signature = (
+        int(state.get("step", 0)),
+        cfg["field"],
+        str(state.get("status", "in_progress")),
+        bool(state.get("pending_custom")),
+    )
+    if state.get("last_prompt_signature") == list(prompt_signature):
+        return
     # Free-text-only steps must explicitly expect the next text message.
     if cfg["type"] == "text":
         state["awaiting_custom_input"] = True
     elif not state.get("pending_custom"):
         state["awaiting_custom_input"] = False
+    state["last_prompt_signature"] = list(prompt_signature)
     _setup_save_state(context, chat_id, state)
     kb = _setup_keyboard(state, chat_id)
     await msg.reply_text(cfg["text"], reply_markup=kb)
@@ -1037,15 +1089,18 @@ async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, cha
     if state.get("editing_field") and state.get("status") == "editing":
         state["editing_field"] = None
         state["status"] = "confirm"
+        state["last_prompt_signature"] = None
         _setup_save_state(context, chat_id, state)
         await _setup_show_summary(msg, context, chat_id)
         return
     state["step"] += 1
     if state["step"] >= len(SETUP_FIELDS):
         state["status"] = "confirm"
+        state["last_prompt_signature"] = None
         _setup_save_state(context, chat_id, state)
         await _setup_show_summary(msg, context, chat_id)
         return
+    state["last_prompt_signature"] = None
     _setup_save_state(context, chat_id, state)
     await _send_setup_question(msg, context, chat_id)
 
@@ -1261,6 +1316,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["multi_selected"] = []
         state["status"] = "in_progress"
         state["editing_field"] = None
+        state["last_prompt_signature"] = None
         _setup_save_state(context, chat_id, state)
         await _send_setup_question(q.message, context, chat_id)
         return
@@ -1293,6 +1349,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         state["awaiting_custom_input"] = False
         state["multi_selected"] = []
         state["status"] = "editing"
+        state["last_prompt_signature"] = None
         _setup_save_state(context, chat_id, state)
         await _send_setup_question(q.message, context, chat_id)
 
@@ -1423,20 +1480,23 @@ async def handle_dialogue_reply(
 
 
 def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dict[str, Any] | None:
-    """Find active setup session by chat_id, user_id, or disk scan."""
+    """Find the current chat's setup session and avoid drifting into stale sessions."""
     chat_id = update.effective_chat.id
     st = _setup_state(context, chat_id)
     if st is not None:
         return st
     uid = update.effective_user.id if update.effective_user else None
-    if uid and uid != chat_id:
-        st = _setup_state(context, uid)
-        if st is not None:
-            return st
     sessions = context.bot_data.get("setup_sessions", {})
+    for st in sessions.values():
+        if isinstance(st, dict) and int(st.get("origin_chat_id") or 0) == chat_id:
+            return st
     if uid:
         for st in sessions.values():
-            if isinstance(st, dict) and st.get("owner_user_id") == uid:
+            if (
+                isinstance(st, dict)
+                and st.get("owner_user_id") == uid
+                and int(st.get("origin_chat_id") or 0) == chat_id
+            ):
                 return st
     base = context.bot_data["data_dir"] / "setup_sessions"
     if base.is_dir():
@@ -1450,7 +1510,14 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
             if cid in sessions:
                 continue
             loaded = _setup_state(context, cid)
-            if loaded and uid and loaded.get("owner_user_id") == uid:
+            if loaded and int(loaded.get("origin_chat_id") or 0) == chat_id:
+                return loaded
+            if (
+                loaded
+                and uid
+                and loaded.get("owner_user_id") == uid
+                and int(loaded.get("origin_chat_id") or 0) == chat_id
+            ):
                 return loaded
     return None
 
