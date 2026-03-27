@@ -1069,41 +1069,87 @@ async def handle_setup_text_input(
         await _setup_advance_or_summary(msg, context, chat_id)
 
 
+def _callback_chat_id_candidates(update: Update, q) -> list[int]:
+    """Return unique non-zero chat_id integers extractable from a callback update."""
+    seen: set[int] = set()
+    result: list[int] = []
+    for raw in [
+        getattr(getattr(q, "message", None), "chat_id", None),
+        getattr(getattr(getattr(q, "message", None), "chat", None), "id", None),
+        getattr(getattr(update, "effective_chat", None), "id", None),
+        getattr(getattr(q, "from_user", None), "id", None),
+    ]:
+        try:
+            cid = int(raw)
+            if cid and cid not in seen:
+                seen.add(cid)
+                result.append(cid)
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
 async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data:
         return
     parts = q.data.split(":")
-    # Format: s:<chat_id>:<action>[:<value>]
-    if len(parts) < 3 or parts[0] != "s":
+    if not parts or parts[0] != "s":
         return
     await q.answer()
     if not q.message:
         return
 
-    # Extract chat_id directly from callback data — no guessing needed.
-    # Old buttons (pre-format-change) have format s:<action>[:<value>] where parts[1] is
-    # not an integer. Detect this and ask the user to restart setup.
+    # --- Session resolution (multi-strategy, most specific first) ---
+    chat_id: int | None = None
+    state: dict[str, Any] | None = None
+
+    # Strategy 1: New format s:<chat_id>:<action>[:<value>] — chat_id is embedded in data.
     try:
-        chat_id = int(parts[1])
+        embedded_cid = int(parts[1])
+        if embedded_cid:  # skip if 0 or negative-ish invalid sentinel
+            st = _setup_state(context, embedded_cid)
+            if st is not None:
+                chat_id = embedded_cid
+                state = st
     except (ValueError, IndexError):
-        logger.warning("Old-format setup callback button clicked: %s", q.data)
-        await q.message.reply_text(
-            "These buttons are outdated. Please run /setup again to get fresh ones."
-        )
+        pass  # old format — will fall through to strategy 2
+
+    # Strategy 2: Look up from Telegram context (works for old-format buttons and mismatched cid).
+    if state is None:
+        for cid_candidate in _callback_chat_id_candidates(update, q):
+            st = _setup_state(context, cid_candidate)
+            if st is not None:
+                chat_id = cid_candidate
+                state = st
+                break
+
+    # Strategy 3: Scan all in-memory sessions by owner_user_id.
+    if state is None and q.from_user:
+        uid = q.from_user.id
+        for cid_key, st in context.bot_data.get("setup_sessions", {}).items():
+            if isinstance(st, dict) and st.get("owner_user_id") == uid:
+                chat_id = int(cid_key)
+                state = st
+                break
+
+    if state is None or chat_id is None:
+        logger.warning("Setup callback: no active session found. data=%s", q.data)
+        # Show a brief popup — do NOT clutter the chat with an error message.
+        await q.answer("No active setup session. Send /setup to begin.", show_alert=True)
         return
 
-    state = _setup_state(context, chat_id)
-    if not state:
-        logger.warning(
-            "Setup callback without active session. callback=%s chat_id=%s",
-            q.data,
-            chat_id,
-        )
-        await q.message.reply_text("No active setup session. Send /setup to begin.")
-        return
+    # Determine action/value offset based on format:
+    # New: s:<chat_id>:<action>[:<value>]  → action at index 2, value at index 3
+    # Old: s:<action>[:<value>]            → action at index 1, value at index 2
+    try:
+        _is_new_fmt = bool(int(parts[1]))
+    except (ValueError, IndexError):
+        _is_new_fmt = False
+    _act_idx = 2 if _is_new_fmt else 1
+    _val_idx = 3 if _is_new_fmt else 2
 
-    action = parts[2] if len(parts) > 2 else ""
+    action = parts[_act_idx] if len(parts) > _act_idx else ""
     if action in {"pick", "toggle", "done", "custom"}:
         cfg = _setup_question_config(state["step"])
         field = cfg["field"]
@@ -1116,7 +1162,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         if action == "pick":
-            value = parts[3] if len(parts) > 3 else ""
+            value = parts[_val_idx] if len(parts) > _val_idx else ""
             state["awaiting_custom_input"] = False
             if field == "authorized_vpns" and value == "no_vpns":
                 state["answers"][field] = []
@@ -1129,7 +1175,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         if action == "toggle":
-            value = parts[3] if len(parts) > 3 else ""
+            value = parts[_val_idx] if len(parts) > _val_idx else ""
             selected = set(state.get("multi_selected") or [])
             if field == "cloud_providers" and value == "None":
                 selected = {"None"} if value not in selected else set()
@@ -1194,8 +1240,8 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    if action == "editfield" and len(parts) > 3:
-        field = parts[3]
+    if action == "editfield" and len(parts) > _val_idx:
+        field = parts[_val_idx]
         if field not in SETUP_FIELDS:
             await q.message.reply_text("Unknown field.")
             return
