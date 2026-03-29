@@ -1537,6 +1537,13 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
                 and int(st.get("origin_chat_id") or 0) == chat_id
             ):
                 return st
+        for st in sessions.values():
+            if (
+                isinstance(st, dict)
+                and st.get("owner_user_id") == uid
+                and str(st.get("status", "in_progress")) != "confirm"
+            ):
+                return st
     base = context.bot_data["data_dir"] / "setup_sessions"
     if base.is_dir():
         for f in base.iterdir():
@@ -1556,6 +1563,13 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
                 and uid
                 and loaded.get("owner_user_id") == uid
                 and int(loaded.get("origin_chat_id") or 0) == chat_id
+            ):
+                return loaded
+            if (
+                loaded
+                and uid
+                and loaded.get("owner_user_id") == uid
+                and str(loaded.get("status", "in_progress")) != "confirm"
             ):
                 return loaded
     return None
@@ -1586,29 +1600,27 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if setup_st is not None:
         step = setup_st.get("step", 0)
         status = setup_st.get("status", "in_progress")
-        # If the wizard reached the summary/confirm screen, step == len(SETUP_FIELDS).
-        # In that state text is not part of the wizard — let it through to IOC pipeline.
         if status == "confirm" or step >= len(SETUP_FIELDS):
-            pass  # fall through to IOC / dialogue handling below
-        elif setup_st.get("awaiting_custom_input") or setup_st.get("pending_custom"):
+            await msg.reply_text("Setup is waiting for your buttons. Use Confirm, Redo, or Edit specific field.")
+            return
+        if setup_st.get("awaiting_custom_input") or setup_st.get("pending_custom"):
             await handle_setup_text_input(update, context, user_text, state=setup_st)
             return
-        else:
-            try:
-                cfg = _setup_question_config(step)
-            except (IndexError, KeyError):
-                logger.error("on_text: invalid setup step %s, clearing session", step)
-                origin = int(setup_st.get("origin_chat_id") or chat_id)
-                _setup_clear_state(context, origin)
-                # fall through to IOC handling
-            else:
-                if cfg["type"] == "text":
-                    await handle_setup_text_input(update, context, user_text, state=setup_st)
-                    return
-                await msg.reply_text(
-                    "Please select one of the buttons for this setup step, or tap Custom to type."
-                )
-                return
+        try:
+            cfg = _setup_question_config(step)
+        except (IndexError, KeyError):
+            logger.error("on_text: invalid setup step %s, clearing session", step)
+            origin = int(setup_st.get("origin_chat_id") or chat_id)
+            _setup_clear_state(context, origin)
+            await msg.reply_text("Setup session was reset. Send /setup to begin again.")
+            return
+        if cfg["type"] == "text":
+            await handle_setup_text_input(update, context, user_text, state=setup_st)
+            return
+        await msg.reply_text(
+            "Please use the buttons for this step, or tap Custom before typing your answer."
+        )
+        return
 
     # 2) Dialogue follow-up session.
     sess = get_session(chat_id, data_dir)
