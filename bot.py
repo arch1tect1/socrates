@@ -798,6 +798,9 @@ def _setup_save_state(
     # Only set origin_chat_id once — never overwrite after the session is created.
     if not state.get("origin_chat_id"):
         state["origin_chat_id"] = chat_id
+    owner_user_id = state.get("owner_user_id")
+    if owner_user_id:
+        context.bot_data.setdefault("setup_active_by_user", {})[int(owner_user_id)] = int(chat_id)
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = state
     path = _setup_session_path(context, chat_id)
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -805,6 +808,13 @@ def _setup_save_state(
 
 def _setup_clear_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     context.bot_data.get("setup_sessions", {}).pop(chat_id, None)
+    active_by_user = context.bot_data.get("setup_active_by_user", {})
+    for uid, active_chat_id in list(active_by_user.items()):
+        try:
+            if int(active_chat_id) == int(chat_id):
+                active_by_user.pop(uid, None)
+        except (TypeError, ValueError):
+            active_by_user.pop(uid, None)
     path = _setup_session_path(context, chat_id)
     path.unlink(missing_ok=True)
 
@@ -1525,6 +1535,15 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
     if st is not None:
         return st
     uid = update.effective_user.id if update.effective_user else None
+    if uid:
+        active_chat_id = context.bot_data.get("setup_active_by_user", {}).get(int(uid))
+        try:
+            if active_chat_id is not None:
+                st = _setup_state(context, int(active_chat_id))
+                if st is not None:
+                    return st
+        except (TypeError, ValueError):
+            pass
     sessions = context.bot_data.get("setup_sessions", {})
     for st in sessions.values():
         if isinstance(st, dict) and int(st.get("origin_chat_id") or 0) == chat_id:
@@ -1663,6 +1682,7 @@ def main() -> None:
     app.bot_data["data_dir"] = cfg.data_dir
     app.bot_data["feedback_pending"] = {}
     app.bot_data["setup_sessions"] = {}
+    app.bot_data["setup_active_by_user"] = {}
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
