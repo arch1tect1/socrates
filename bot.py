@@ -981,15 +981,16 @@ def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup
         return None
 
     cid = chat_id  # always use the authoritative chat_id, never rely on state field
+    step_token = int(state.get("step", 0))
 
     if cfg["type"] == "single":
         labels = cfg.get("labels") or cfg["options"]
         buttons = [
-            InlineKeyboardButton(lbl, callback_data=f"s:{cid}:pick:{opt}")
+            InlineKeyboardButton(lbl, callback_data=f"s:{cid}:{step_token}:pick:{opt}")
             for opt, lbl in zip(cfg["options"], labels)
         ]
         rows = _chunk_buttons(buttons, per_row=2)
-        rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:custom")])
+        rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:{step_token}:custom")])
         return InlineKeyboardMarkup(rows)
 
     selected = set(state.get("multi_selected") or [])
@@ -997,11 +998,14 @@ def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup
     for opt in cfg["options"]:
         checked = "✅ " if opt in selected else ""
         buttons.append(
-            InlineKeyboardButton(f"{checked}{opt}", callback_data=f"s:{cid}:toggle:{opt}")
+            InlineKeyboardButton(
+                f"{checked}{opt}",
+                callback_data=f"s:{cid}:{step_token}:toggle:{opt}",
+            )
         )
     rows = _chunk_buttons(buttons, per_row=2)
-    rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:custom")])
-    rows.append([InlineKeyboardButton("Done ✓", callback_data=f"s:{cid}:done")])
+    rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:{step_token}:custom")])
+    rows.append([InlineKeyboardButton("Done ✓", callback_data=f"s:{cid}:{step_token}:done")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1232,25 +1236,50 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     session_status = state.get("status", "in_progress")
 
-    # Determine action/value offset based on format:
-    # New: s:<chat_id>:<action>[:<value>]  → action at index 2, value at index 3
-    # Old: s:<action>[:<value>]            → action at index 1, value at index 2
-    # Detect by checking whether parts[1] is a digit string (not an action keyword).
+    # Supported callback formats:
+    # s:<action>[:<value>]
+    # s:<chat_id>:<action>[:<value>]
+    # s:<chat_id>:<step>:<action>[:<value>]
     _action_keywords = {"pick", "toggle", "done", "custom", "confirm", "redo", "edit", "editfield"}
-    try:
-        _is_new_fmt = parts[1].lstrip("-").isdigit() and parts[1] not in _action_keywords
-    except IndexError:
-        _is_new_fmt = False
-    _act_idx = 2 if _is_new_fmt else 1
-    _val_idx = 3 if _is_new_fmt else 2
+    start_idx = 1
+    if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+        start_idx = 2
 
-    action = parts[_act_idx] if len(parts) > _act_idx else ""
+    callback_step: int | None = None
+    if len(parts) > start_idx and parts[start_idx].lstrip("-").isdigit():
+        callback_step = int(parts[start_idx])
+        start_idx += 1
+
+    action = parts[start_idx] if len(parts) > start_idx else ""
+    _val_idx = start_idx + 1
 
     # Guard: stale wizard-step callbacks must not fire when the session is at the
     # summary/confirm stage, and a stale confirm must not fire on an in-progress session.
     if action in {"pick", "toggle", "done", "custom"} and session_status == "confirm":
         logger.warning("Stale wizard callback %s on confirm-stage session, ignoring", action)
         await q.answer("Setup already complete. Confirm or Redo.", show_alert=False)
+        return
+    current_step = int(state.get("step", 0))
+    if (
+        callback_step is not None
+        and action in {"pick", "toggle", "done", "custom"}
+        and callback_step != current_step
+    ):
+        logger.warning(
+            "Stale setup callback %s for step %s while session is at step %s",
+            action,
+            callback_step,
+            current_step,
+        )
+        await q.answer("That button is from an older step. Use the latest setup message.", show_alert=False)
+        return
+    if action in {"confirm", "redo", "edit", "editfield"} and session_status != "confirm":
+        logger.warning(
+            "Ignoring summary callback %s while session status is %s",
+            action,
+            session_status,
+        )
+        await q.answer("Use the latest setup message.", show_alert=False)
         return
     if action == "confirm" and session_status != "confirm":
         logger.warning("Stale confirm callback on non-confirm session (status=%s), ignoring", session_status)
