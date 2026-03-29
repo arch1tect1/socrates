@@ -247,6 +247,35 @@ class SetupFlowTests(unittest.IsolatedAsyncioTestCase):
         await bot.on_text(update, self.context)
         return message, self._state()
 
+    async def _complete_until_step(self, target_step: int):
+        state = self._state()
+        while state["step"] < target_step:
+            step = state["step"]
+            if step == 0:
+                _, _, state = await self._click_current("pick", "finance")
+            elif step == 1:
+                _, state = await self._send_text("Acme")
+            elif step == 2:
+                _, _, state = await self._click_current("toggle", "AWS")
+                _, _, state = await self._click_current("done")
+            elif step == 3:
+                _, _, state = await self._click_current("pick", "block")
+            elif step == 4:
+                _, _, state = await self._click_current("pick", "no_vpns")
+            elif step == 5:
+                _, _, state = await self._click_current("pick", "monitor")
+            elif step == 6:
+                _, _, state = await self._click_current("pick", "skip")
+            elif step == 7:
+                _, _, state = await self._click_current("custom")
+                _, state = await self._send_text("2.2.2.0/24")
+            elif step == 8:
+                _, _, state = await self._click_current("toggle", "Palo Alto")
+                _, _, state = await self._click_current("done")
+            else:
+                raise AssertionError(f"Unexpected step {step}")
+        return state
+
     async def test_full_setup_flow_stays_inside_wizard(self):
         _, _, state = await self._click_current("pick", "finance")
         self.assertEqual(state["step"], 1)
@@ -352,6 +381,99 @@ class SetupFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["step"], 1)
         _, state = await self._send_text("Redo Org")
         self.assertEqual(state["step"], 2)
+
+    async def test_each_single_choice_button_advances(self):
+        single_cases = [
+            (0, ["finance", "healthcare", "education", "government", "tech", "ecommerce"], 1),
+            (3, ["block", "monitor", "allow"], 4),
+            (4, ["no_vpns"], 5),
+            (5, ["block", "monitor", "allow"], 6),
+            (6, ["skip"], 7),
+            (7, ["skip"], 8),
+        ]
+        for step, options, expected_step in single_cases:
+            for option in options:
+                with self.subTest(step=step, option=option):
+                    await self.asyncSetUp()
+                    await self._complete_until_step(step)
+                    _, _, state = await self._click_current("pick", option)
+                    self.assertEqual(state["step"], expected_step)
+
+    async def test_each_custom_button_accepts_text_and_stays_in_setup(self):
+        custom_cases = [
+            (0, "Custom Industry", 1, "industry"),
+            (2, "AWS, Azure", 3, "cloud_providers"),
+            (3, "monitor", 4, "tor_policy"),
+            (4, "1.1.1.0/24, 2.2.2.0/24", 5, "authorized_vpns"),
+            (5, "allow", 6, "unknown_vpn_policy"),
+            (6, "10.0.0.0/8, 192.168.0.0/16", 7, "never_block_ips"),
+            (7, "2.2.2.0/24, 3.3.3.0/24", 8, "own_infrastructure"),
+            (8, "Palo Alto, Elastic", 9, "security_stack"),
+        ]
+        for step, answer, expected_step, field in custom_cases:
+            with self.subTest(step=step, field=field):
+                await self.asyncSetUp()
+                await self._complete_until_step(step)
+                _, _, state = await self._click_current("custom")
+                self.assertEqual(state["pending_custom"], field)
+                message, state = await self._send_text(answer)
+                if expected_step == 9:
+                    self.assertEqual(state["status"], "confirm")
+                    self.assertTrue(any("Setup summary" in reply for reply in message.replies))
+                else:
+                    self.assertEqual(state["step"], expected_step)
+                    self.assertFalse(any("VERDICT" in reply for reply in message.replies))
+
+    async def test_each_multi_select_button_and_done(self):
+        multi_cases = [
+            (2, ["AWS", "Azure", "GCP", "None"], 3),
+            (
+                8,
+                ["CrowdStrike", "SentinelOne", "Palo Alto", "Fortinet", "Splunk", "Microsoft Sentinel", "Elastic"],
+                9,
+            ),
+        ]
+        for step, options, expected_step in multi_cases:
+            for option in options:
+                with self.subTest(step=step, option=option):
+                    await self.asyncSetUp()
+                    await self._complete_until_step(step)
+                    _, query, state = await self._click_current("toggle", option)
+                    self.assertIn(option, state["multi_selected"])
+                    self.assertTrue(query.edits)
+                    _, _, state = await self._click_current("done")
+                    if expected_step == 9:
+                        self.assertEqual(state["status"], "confirm")
+                    else:
+                        self.assertEqual(state["step"], expected_step)
+
+    async def test_edit_specific_field_works_for_each_field(self):
+        await self._complete_until_step(9)
+        self.assertEqual(self._state()["status"], "confirm")
+        for index, field in enumerate(bot.SETUP_FIELDS):
+            with self.subTest(field=field):
+                await self.asyncSetUp()
+                await self._complete_until_step(9)
+                summary_message = FakeMessage(self.chat_id)
+                query = FakeQuery(f"s:{self.chat_id}:edit", summary_message, user_id=self.user_id)
+                update = FakeUpdate(
+                    chat_id=self.chat_id,
+                    user_id=self.user_id,
+                    message=summary_message,
+                    query=query,
+                )
+                await bot.handle_setup_callback(update, self.context)
+                query = FakeQuery(f"s:{self.chat_id}:editfield:{field}", summary_message, user_id=self.user_id)
+                update = FakeUpdate(
+                    chat_id=self.chat_id,
+                    user_id=self.user_id,
+                    message=summary_message,
+                    query=query,
+                )
+                await bot.handle_setup_callback(update, self.context)
+                state = self._state()
+                self.assertEqual(state["step"], index)
+                self.assertEqual(state["status"], "editing")
 
 
 if __name__ == "__main__":
