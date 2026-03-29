@@ -995,12 +995,25 @@ def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup
 
     if cfg["type"] == "single":
         labels = cfg.get("labels") or cfg["options"]
+        field = cfg["field"]
+        current_value = state.get("answers", {}).get(field)
         buttons = [
-            InlineKeyboardButton(lbl, callback_data=f"s:{cid}:{step_token}:pick:{opt}")
+            InlineKeyboardButton(
+                f"{'✅ ' if current_value == opt else ''}{lbl}",
+                callback_data=f"s:{cid}:{step_token}:pick:{opt}",
+            )
             for opt, lbl in zip(cfg["options"], labels)
         ]
         rows = _chunk_buttons(buttons, per_row=2)
-        rows.append([InlineKeyboardButton("Custom", callback_data=f"s:{cid}:{step_token}:custom")])
+        custom_checked = "✅ " if state.get("pending_custom") == field else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{custom_checked}Custom",
+                    callback_data=f"s:{cid}:{step_token}:custom",
+                )
+            ]
+        )
         return InlineKeyboardMarkup(rows)
 
     selected = set(state.get("multi_selected") or [])
@@ -1304,11 +1317,15 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             state["pending_custom"] = field
             state["awaiting_custom_input"] = True
             _setup_save_state(context, chat_id, state)
+            updated_kb = _setup_keyboard(state, chat_id)
+            if updated_kb is not None:
+                await q.edit_message_reply_markup(reply_markup=updated_kb)
             await q.message.reply_text(cfg.get("custom_prompt", "Type your answer:"))
             return
 
         if action == "pick":
             value = parts[_val_idx] if len(parts) > _val_idx else ""
+            state["pending_custom"] = None
             state["awaiting_custom_input"] = False
             if field == "authorized_vpns" and value == "no_vpns":
                 state["answers"][field] = []
@@ -1317,6 +1334,9 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             else:
                 state["answers"][field] = value
             _setup_save_state(context, chat_id, state)
+            updated_kb = _setup_keyboard(state, chat_id)
+            if updated_kb is not None:
+                await q.edit_message_reply_markup(reply_markup=updated_kb)
             await _setup_advance_or_summary(q.message, context, chat_id)
             return
 
@@ -1594,11 +1614,45 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
     return None
 
 
+def _has_incomplete_setup_session(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int | None
+) -> bool:
+    sessions = context.bot_data.get("setup_sessions", {})
+    for st in sessions.values():
+        if not isinstance(st, dict):
+            continue
+        if str(st.get("status", "in_progress")) == "confirm":
+            continue
+        if int(st.get("origin_chat_id") or 0) == chat_id:
+            return True
+        if user_id and st.get("owner_user_id") == user_id:
+            return True
+
+    base = context.bot_data["data_dir"] / "setup_sessions"
+    if not base.is_dir():
+        return False
+    for path in base.glob("*.json"):
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        if str(loaded.get("status", "in_progress")) == "confirm":
+            continue
+        if int(loaded.get("origin_chat_id") or 0) == chat_id:
+            return True
+        if user_id and loaded.get("owner_user_id") == user_id:
+            return True
+    return False
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg or not msg.text:
         return
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else None
     user_text = msg.text.strip()
     if not user_text:
         return
@@ -1638,6 +1692,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         await msg.reply_text(
             "Please use the buttons for this step, or tap Custom before typing your answer."
+        )
+        return
+
+    if _has_incomplete_setup_session(context, chat_id, user_id):
+        await msg.reply_text(
+            "Setup is still in progress. Please continue the setup steps instead of sending analysis input."
         )
         return
 
