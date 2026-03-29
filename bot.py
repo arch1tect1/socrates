@@ -997,9 +997,17 @@ def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup
         labels = cfg.get("labels") or cfg["options"]
         field = cfg["field"]
         current_value = state.get("answers", {}).get(field)
+
+        def _single_selected(opt: str) -> bool:
+            if field == "authorized_vpns" and opt == "no_vpns":
+                return current_value == []
+            if field in ("never_block_ips", "own_infrastructure") and opt == "skip":
+                return current_value == []
+            return current_value == opt
+
         buttons = [
             InlineKeyboardButton(
-                f"{'✅ ' if current_value == opt else ''}{lbl}",
+                f"{'✅ ' if _single_selected(opt) else ''}{lbl}",
                 callback_data=f"s:{cid}:{step_token}:pick:{opt}",
             )
             for opt, lbl in zip(cfg["options"], labels)
@@ -1318,8 +1326,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             state["awaiting_custom_input"] = True
             _setup_save_state(context, chat_id, state)
             updated_kb = _setup_keyboard(state, chat_id)
-            if updated_kb is not None:
-                await q.edit_message_reply_markup(reply_markup=updated_kb)
+            await _safe_edit_setup_markup(q, updated_kb)
             await q.message.reply_text(cfg.get("custom_prompt", "Type your answer:"))
             return
 
@@ -1335,8 +1342,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 state["answers"][field] = value
             _setup_save_state(context, chat_id, state)
             updated_kb = _setup_keyboard(state, chat_id)
-            if updated_kb is not None:
-                await q.edit_message_reply_markup(reply_markup=updated_kb)
+            await _safe_edit_setup_markup(q, updated_kb)
             await _setup_advance_or_summary(q.message, context, chat_id)
             return
 
@@ -1354,8 +1360,7 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             state["multi_selected"] = list(selected)
             _setup_save_state(context, chat_id, state)
             updated_kb = _setup_keyboard(state, chat_id)
-            if updated_kb is not None:
-                await q.edit_message_reply_markup(reply_markup=updated_kb)
+            await _safe_edit_setup_markup(q, updated_kb)
             return
 
         if action == "done":
@@ -1645,6 +1650,13 @@ def _has_incomplete_setup_session(
         if user_id and loaded.get("owner_user_id") == user_id:
             return True
     return False
+
+
+async def _safe_edit_setup_markup(q, reply_markup: InlineKeyboardMarkup | None) -> None:
+    if reply_markup is None:
+        return
+    with contextlib.suppress(TelegramError):
+        await q.edit_message_reply_markup(reply_markup=reply_markup)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
