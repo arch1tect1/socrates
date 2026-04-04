@@ -10,6 +10,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+async def _anone(*args, **kwargs):
+    return None
+
+
+async def _aempty_str(*args, **kwargs):
+    return ""
+
+
+async def _aempty_list(*args, **kwargs):
+    return []
+
+
+async def _aempty_tuple_str(*args, **kwargs):
+    return ("", "")
+
+
+async def _azero(*args, **kwargs):
+    return 0
+
+
+async def _adict(*args, **kwargs):
+    return {}
+
+
 def _install_test_stubs() -> None:
     telegram = types.ModuleType("telegram")
 
@@ -56,6 +80,7 @@ def _install_test_stubs() -> None:
     telegram_ext.CallbackQueryHandler = lambda *args, **kwargs: None
     telegram_ext.CommandHandler = lambda *args, **kwargs: None
     telegram_ext.MessageHandler = lambda *args, **kwargs: None
+    telegram_ext.TypeHandler = lambda *args, **kwargs: None
     telegram_ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
     telegram_ext.filters = types.SimpleNamespace(TEXT=1, COMMAND=2)
     sys.modules["telegram.ext"] = telegram_ext
@@ -63,6 +88,34 @@ def _install_test_stubs() -> None:
     telegram_request = types.ModuleType("telegram.request")
     telegram_request.HTTPXRequest = lambda *args, **kwargs: None
     sys.modules["telegram.request"] = telegram_request
+
+    # Prometheus metrics stubs
+    class _StubCounter:
+        def labels(self, **kwargs):
+            return self
+        def inc(self, amount=1):
+            pass
+
+    class _StubGauge:
+        def set(self, value):
+            pass
+
+    metrics_mod = types.ModuleType("metrics")
+    metrics_mod.analyses_total = _StubCounter()
+    metrics_mod.verdicts_total = _StubCounter()
+    metrics_mod.feedback_total = _StubCounter()
+    metrics_mod.start_metrics_server = lambda: None
+    sys.modules["metrics"] = metrics_mod
+
+    # Database stubs
+    database_mod = types.ModuleType("database")
+    database_mod.get_or_create_user = _azero
+    database_mod.get_admin_stats = _adict
+    database_mod.get_user_id = _anone
+    database_mod.update_user_activity = _anone
+    database_mod.init_db = _anone
+    database_mod.close_db = _anone
+    sys.modules["database"] = database_mod
 
     stub_modules = {
         "analyzer": {"analyze_enrichment": lambda *args, **kwargs: ("", "stub")},
@@ -78,9 +131,9 @@ def _install_test_stubs() -> None:
         },
         "dialogue.session": {
             "SessionState": object,
-            "clear_session": lambda *args, **kwargs: None,
-            "get_session": lambda *args, **kwargs: None,
-            "put_session": lambda *args, **kwargs: None,
+            "clear_session": _anone,
+            "get_session": _anone,
+            "put_session": _anone,
         },
         "enrichers.abuseipdb": {"AbuseIPDBClient": object},
         "enrichers.otx": {"OTXClient": object},
@@ -95,24 +148,24 @@ def _install_test_stubs() -> None:
         },
         "memory.feedback": {
             "create_decision_record": lambda *args, **kwargs: None,
-            "update_feedback": lambda *args, **kwargs: None,
+            "update_feedback": _anone,
         },
         "memory.models": {"DecisionRecord": object},
         "memory.retriever": {
             "build_enrichment_summary": lambda *args, **kwargs: "",
-            "find_similar_decisions": lambda *args, **kwargs: [],
+            "find_similar_decisions": _aempty_list,
             "format_past_decisions_for_llm": lambda *args, **kwargs: "",
         },
         "memory.store": {
-            "clear_all_decisions": lambda *args, **kwargs: None,
-            "load_all_decisions": lambda *args, **kwargs: [],
+            "clear_all_decisions": _azero,
+            "load_all_decisions": _aempty_list,
             "parse_verdict_lines": lambda *args, **kwargs: ("", ""),
-            "save_decision": lambda *args, **kwargs: None,
+            "save_decision": _anone,
         },
         "org_profile.context_builder": {
             "apply_org_match_to_entry": lambda *args, **kwargs: None,
             "apply_vpn_proxy_policy": lambda *args, **kwargs: None,
-            "build_org_context": lambda *args, **kwargs: "",
+            "build_org_context": _aempty_str,
             "format_profile_summary": lambda profile: "summary",
         },
         "org_profile.models": {
@@ -123,7 +176,7 @@ def _install_test_stubs() -> None:
             )
         },
         "org_profile.storage": {
-            "load_profile": lambda *args, **kwargs: None,
+            "load_profile": _anone,
             "parse_cidr_list": lambda text: [
                 item.strip()
                 for item in text.replace(";", ",").split(",")
@@ -138,7 +191,7 @@ def _install_test_stubs() -> None:
             ]
             if text.strip().lower() not in ("", "skip", "none")
             else [],
-            "save_profile": lambda *args, **kwargs: None,
+            "save_profile": _anone,
         },
     }
 

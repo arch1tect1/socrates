@@ -4,14 +4,34 @@
 # Use exactly one replica — Telegram polling cannot run twice with the same token.
 
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: socrates-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: socrates
+      POSTGRES_PASSWORD: socrates
+      POSTGRES_DB: socrates
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U socrates"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   soc-bot:
     build: .
     container_name: socrates-bot
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     env_file:
       - .env
     environment:
       - DATA_DIR=/app/data
+      - DATABASE_URL=postgresql://socrates:socrates@db:5432/socrates
     volumes:
       - socrates-data:/app/data
     # Optional: pin DNS if your host has resolver issues
@@ -21,3 +41,4 @@ services:
 
 volumes:
   socrates-data:
+  pgdata:

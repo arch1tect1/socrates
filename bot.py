@@ -14,11 +14,20 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 from telegram.request import HTTPXRequest
 
 from analyzer import analyze_enrichment
 from config import load_config
+from database import close_db, get_admin_stats, get_or_create_user, init_db
 from detector import InputKind, detect_input
 from dialogue.ambiguity import detect_ambiguity, first_enriched_entry
 from dialogue.followup import format_preliminary, generate_followups
@@ -42,6 +51,12 @@ from memory.retriever import (
     format_past_decisions_for_llm,
 )
 from memory.store import clear_all_decisions, load_all_decisions, parse_verdict_lines, save_decision
+from metrics import (
+    analyses_total,
+    feedback_total,
+    start_metrics_server,
+    verdicts_total,
+)
 from org_profile.context_builder import (
     apply_org_match_to_entry,
     apply_vpn_proxy_policy,
@@ -274,10 +289,10 @@ async def build_payload(
     }
 
 
-def _apply_org_profile_to_payload(
-    payload: dict[str, Any], data_dir, chat_id: int
+async def _apply_org_profile_to_payload(
+    payload: dict[str, Any], chat_id: int
 ) -> OrgProfile | None:
-    prof = load_profile(data_dir, chat_id)
+    prof = await load_profile(chat_id)
     if not prof:
         return None
     for e in payload.get("ioc_entries") or []:
@@ -334,7 +349,6 @@ async def _send_verdict_with_memory(
     msg = update.effective_message
     if not msg:
         return
-    data_dir = context.bot_data["data_dir"]
     decision_id = uuid.uuid4().hex
     v, sev = parse_verdict_lines(analysis)
     show_feedback = _should_show_feedback_buttons(entry, payload, v, analysis)
@@ -350,7 +364,12 @@ async def _send_verdict_with_memory(
         ai_verdict=v,
         ai_severity=sev,
     )
-    save_decision(data_dir, rec)
+    await save_decision(rec)
+
+    # Prometheus metrics
+    analyses_total.labels(ioc_type=rec.ioc_type or "unknown").inc()
+    if v:
+        verdicts_total.labels(verdict=v.lower()).inc()
 
     src_line = f"LLM: {llm_source}" if llm_source else ""
     formatted = format_telegram_report(
@@ -423,17 +442,15 @@ async def process_ioc_pipeline(
     shodan: ShodanClient = context.bot_data["shodan"]
     urlscan: UrlscanClient = context.bot_data["urlscan"]
     otx: OTXClient = context.bot_data["otx"]
-    data_dir = context.bot_data["data_dir"]
 
     payload = await build_payload(vt, abuse, shodan, urlscan, otx, user_text)
-    prof = _apply_org_profile_to_payload(payload, data_dir, chat_id)
-    org_block = build_org_context(data_dir, chat_id)
+    prof = await _apply_org_profile_to_payload(payload, chat_id)
+    org_block = await build_org_context(chat_id)
 
     entry = first_enriched_entry(payload)
     past_block = ""
     if entry:
-        sim = find_similar_decisions(
-            data_dir,
+        sim = await find_similar_decisions(
             chat_id,
             entry.get("kind", ""),
             str(entry.get("ioc", "")),
@@ -465,7 +482,7 @@ async def process_ioc_pipeline(
             followup_questions=questions,
             status="awaiting_followup",
         )
-        put_session(sess, data_dir)
+        await put_session(sess)
         qtext = "\n".join(f"• {q}" for q in questions)
         total_q = len(questions)
         first_q = questions[0] if questions else "Please share any relevant context."
@@ -490,6 +507,27 @@ async def process_ioc_pipeline(
         ambiguity_flags=flags,
     )
 
+
+# ---------------------------------------------------------------------------
+# User tracking middleware
+# ---------------------------------------------------------------------------
+
+async def track_user_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs in handler group -1 for every update to track / register users."""
+    user = update.effective_user
+    if user:
+        await get_or_create_user(
+            telegram_user_id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language_code=user.language_code,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
@@ -543,7 +581,6 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     owner_user_id = int(update.effective_user.id) if update.effective_user else None
-    # Clear any stale session files for this chat so old disk state never bleeds in.
     _setup_clear_state(context, chat_id)
     _setup_clear_user_sessions(context, owner_user_id, keep_chat_id=chat_id)
     new_state = {
@@ -565,26 +602,12 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    uid = update.effective_user.id if update.effective_user else None
-    p = load_profile(data_dir, chat_id)
-    # Fallback: if user_id differs from chat_id (e.g. group vs. private), try user_id too.
-    if p is None and uid and uid != chat_id:
-        p = load_profile(data_dir, uid)
-    # Last-resort: scan profiles directory for a profile whose chat_id field matches.
-    if p is None:
-        profiles_dir = data_dir / "profiles"
-        if profiles_dir.is_dir():
-            for pf in profiles_dir.iterdir():
-                if pf.suffix == ".json":
-                    candidate = load_profile(data_dir, int(pf.stem)) if pf.stem.lstrip("-").isdigit() else None
-                    if candidate and (candidate.chat_id in (chat_id, uid)):
-                        p = candidate
-                        logger.info("cmd_profile: found profile via scan at %s", pf)
-                        break
+    uid = update.effective_user.id if update.effective_user else chat_id
+    p = await load_profile(uid)
+    if p is None and uid != chat_id:
+        p = await load_profile(chat_id)
     if not p:
-        logger.warning("cmd_profile: no profile found for chat_id=%s uid=%s", chat_id, uid)
         await update.effective_message.reply_text("No profile yet. Use /setup.")
         return
     await update.effective_message.reply_html(format_profile_summary(p))
@@ -599,28 +622,26 @@ async def cmd_addpolicy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Usage: /addpolicy Amazon and Google Cloud IPs should never be fully blocked"
         )
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    p = load_profile(data_dir, chat_id)
+    p = await load_profile(chat_id)
     if not p:
         await update.effective_message.reply_text("Run /setup first.")
         return
     p.custom_policies.append(text.strip())
-    save_profile(data_dir, p)
+    await save_profile(p)
     await update.effective_message.reply_text("Policy added.")
 
 
 async def cmd_clearpolicy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    p = load_profile(data_dir, chat_id)
+    p = await load_profile(chat_id)
     if not p:
         await update.effective_message.reply_text("No profile.")
         return
     p.custom_policies = []
-    save_profile(data_dir, p)
+    await save_profile(p)
     await update.effective_message.reply_text("Custom policies cleared.")
 
 
@@ -628,19 +649,17 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     chat_id = update.effective_chat.id
-    data_dir = context.bot_data["data_dir"]
-    sess = get_session(chat_id, data_dir)
+    sess = await get_session(chat_id)
     if not sess or sess.status != "awaiting_followup":
         await update.effective_message.reply_text(
             "No active analysis to skip. Send me an IOC or alert to analyze."
         )
         return
-    org_block = build_org_context(data_dir, chat_id)
+    org_block = await build_org_context(chat_id)
     entry = sess.enrichment_data
     past_block = ""
     if entry:
-        sim = find_similar_decisions(
-            data_dir,
+        sim = await find_similar_decisions(
             chat_id,
             entry.get("kind", ""),
             str(entry.get("ioc", "")),
@@ -651,7 +670,7 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "ANALYST PROVIDED ADDITIONAL CONTEXT:\n"
         "Analyst chose /skip — provide a best-effort verdict without follow-up answers."
     )
-    clear_session(chat_id, data_dir)
+    await clear_session(chat_id)
     await _run_llm_pipeline(
         update,
         context,
@@ -668,10 +687,9 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
     ioc_filter = " ".join(context.args) if context.args else None
-    all_d = load_all_decisions(data_dir, chat_id)
+    all_d = await load_all_decisions(chat_id)
     if ioc_filter:
         all_d = [d for d in all_d if ioc_filter in d.ioc_value]
     lines = []
@@ -691,9 +709,8 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    all_d = load_all_decisions(data_dir, chat_id)
+    all_d = await load_all_decisions(chat_id)
     n = len(all_d)
     agree = sum(1 for d in all_d if d.analyst_feedback == "agree")
     disagree = sum(1 for d in all_d if d.analyst_feedback == "disagree")
@@ -708,9 +725,8 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    all_d = load_all_decisions(data_dir, chat_id)
+    all_d = await load_all_decisions(chat_id)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(
@@ -754,11 +770,70 @@ async def cmd_clearhistory(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "This deletes all stored decisions for this chat. Send: /clearhistory yes"
         )
         return
-    data_dir = context.bot_data["data_dir"]
     chat_id = update.effective_chat.id
-    n = clear_all_decisions(data_dir, chat_id)
-    await update.effective_message.reply_text(f"Cleared {n} decision file(s).")
+    n = await clear_all_decisions(chat_id)
+    await update.effective_message.reply_text(f"Cleared {n} decision(s).")
 
+
+# ---------------------------------------------------------------------------
+# /admin — protected analytics command
+# ---------------------------------------------------------------------------
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not update.effective_user:
+        return
+    admin_id = context.bot_data["config"].admin_telegram_id
+    if update.effective_user.id != admin_id:
+        await update.effective_message.reply_text("⛔ Access denied.")
+        return
+
+    stats = await get_admin_stats()
+
+    ioc_lines = "\n".join(
+        f"  {k}: {v}" for k, v in stats["by_ioc_type"].items()
+    ) or "  No data"
+
+    verdict_lines = "\n".join(
+        f"  {k}: {v}" for k, v in stats["by_verdict"].items()
+    ) or "  No data"
+
+    fb = stats["by_feedback"]
+    total_fb = sum(fb.values()) if fb else 0
+    if total_fb:
+        fb_lines = "\n".join(
+            f"  {k}: {v} ({round(v / total_fb * 100)}%)" for k, v in fb.items()
+        )
+    else:
+        fb_lines = "  No feedback yet"
+
+    top_lines = "\n".join(
+        f"  {i + 1}. @{u['username']} — {u['count']} analyses"
+        for i, u in enumerate(stats["top_users"])
+    ) or "  No data"
+
+    text = (
+        f"📊 SOCrates Admin Dashboard\n\n"
+        f"👥 Users\n"
+        f"  Total: {stats['total_users']}\n"
+        f"  Active (7d): {stats['active_users_7d']}\n\n"
+        f"🔍 Analyses\n"
+        f"  Today: {stats['analyses_today']}\n"
+        f"  This week: {stats['analyses_week']}\n"
+        f"  All time: {stats['analyses_total']}\n\n"
+        f"📋 By IOC Type\n{ioc_lines}\n\n"
+        f"⚖️ Verdicts\n{verdict_lines}\n\n"
+        f"💬 Feedback\n{fb_lines}\n\n"
+        f"🏆 Top 10 Users\n{top_lines}\n\n"
+        f"📈 Avg analyses/user/day: {stats['avg_per_user_per_day']}"
+    )
+
+    for chunk in _chunk_message(text):
+        await update.effective_message.reply_text(chunk)
+
+
+# ---------------------------------------------------------------------------
+# Setup wizard
+# ---------------------------------------------------------------------------
 
 SETUP_FIELDS = [
     "industry",
@@ -795,7 +870,6 @@ def _setup_session_path(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
 def _setup_save_state(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, state: dict[str, Any]
 ) -> None:
-    # Only set origin_chat_id once — never overwrite after the session is created.
     if not state.get("origin_chat_id"):
         state["origin_chat_id"] = chat_id
     owner_user_id = state.get("owner_user_id")
@@ -874,12 +948,10 @@ def _setup_state(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> dict[str, 
         return None
     if not isinstance(loaded, dict):
         return None
-    # Clear stale editing state that may have been persisted before a bot restart.
     if loaded.get("editing_field") and loaded.get("status") != "editing":
         loaded["editing_field"] = None
     if loaded.get("pending_custom"):
         loaded["awaiting_custom_input"] = True
-    # Ensure origin_chat_id is always a valid int (could be null/missing in old files).
     if not loaded.get("origin_chat_id"):
         loaded["origin_chat_id"] = chat_id
     context.bot_data.setdefault("setup_sessions", {})[chat_id] = loaded
@@ -990,7 +1062,7 @@ def _setup_keyboard(state: dict[str, Any], chat_id: int) -> InlineKeyboardMarkup
     if cfg["type"] == "text":
         return None
 
-    cid = chat_id  # always use the authoritative chat_id, never rely on state field
+    cid = chat_id
     step_token = int(state.get("step", 0))
 
     if cfg["type"] == "single":
@@ -1055,7 +1127,6 @@ async def _send_setup_question(
     )
     if state.get("last_prompt_signature") == list(prompt_signature):
         return
-    # Free-text-only steps must explicitly expect the next text message.
     if cfg["type"] == "text":
         state["awaiting_custom_input"] = True
     elif not state.get("pending_custom"):
@@ -1101,7 +1172,7 @@ async def _setup_show_summary(msg, context: ContextTypes.DEFAULT_TYPE, chat_id: 
     if not state:
         return
     profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
-    cid = int(state.get("origin_chat_id") or chat_id)  # never None/0
+    cid = int(state.get("origin_chat_id") or chat_id)
     kb = InlineKeyboardMarkup(
         [
             [
@@ -1123,8 +1194,6 @@ async def _setup_advance_or_summary(msg, context: ContextTypes.DEFAULT_TYPE, cha
     state = _setup_state(context, chat_id)
     if not state:
         return
-    # Only return to summary when BOTH editing_field is set AND we are in an active edit sub-flow.
-    # This prevents stale persisted editing_field from triggering premature summary.
     if state.get("editing_field") and state.get("status") == "editing":
         state["editing_field"] = None
         state["status"] = "confirm"
@@ -1153,8 +1222,6 @@ async def handle_setup_text_input(
     msg = update.effective_message
     if not msg:
         return
-    # Use the passed-in state (already found by caller) to avoid a second lookup
-    # that might use a different chat_id key and silently miss.
     if state is None:
         chat_id = update.effective_chat.id
         state = _setup_state(context, chat_id)
@@ -1216,22 +1283,19 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if not q.message:
         return
 
-    # --- Session resolution (multi-strategy, most specific first) ---
     chat_id: int | None = None
     state: dict[str, Any] | None = None
 
-    # Strategy 1: New format s:<chat_id>:<action>[:<value>] — chat_id is embedded in data.
     try:
         embedded_cid = int(parts[1])
-        if embedded_cid:  # skip if 0 or negative-ish invalid sentinel
+        if embedded_cid:
             st = _setup_state(context, embedded_cid)
             if st is not None:
                 chat_id = embedded_cid
                 state = st
     except (ValueError, IndexError):
-        pass  # old format — will fall through to strategy 2
+        pass
 
-    # Strategy 2: Look up from Telegram context (works for old-format buttons and mismatched cid).
     if state is None:
         for cid_candidate in _callback_chat_id_candidates(update, q):
             st = _setup_state(context, cid_candidate)
@@ -1242,7 +1306,6 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     callback_chat_id = q.message.chat_id if q.message else None
 
-    # Strategy 3: Scan all in-memory sessions by owner_user_id, but only for this chat.
     if state is None and q.from_user:
         uid = q.from_user.id
         for cid_key, st in context.bot_data.get("setup_sessions", {}).items():
@@ -1257,20 +1320,13 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state is None or chat_id is None:
         logger.warning("Setup callback: no active session found. data=%s", q.data)
-        # Use show_alert=False so the brief toast never blocks subsequent button clicks.
         await q.answer("Session expired. Send /setup to begin.", show_alert=False)
         return
 
-    # Always use origin_chat_id as the authoritative storage key so the session
-    # never migrates to a different key when callbacks resolve via fallback strategies.
     chat_id = int(state.get("origin_chat_id") or chat_id)
 
     session_status = state.get("status", "in_progress")
 
-    # Supported callback formats:
-    # s:<action>[:<value>]
-    # s:<chat_id>:<action>[:<value>]
-    # s:<chat_id>:<step>:<action>[:<value>]
     _action_keywords = {"pick", "toggle", "done", "custom", "confirm", "redo", "edit", "editfield"}
     start_idx = 1
     if len(parts) > 1 and parts[1].lstrip("-").isdigit():
@@ -1284,8 +1340,6 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
     action = parts[start_idx] if len(parts) > start_idx else ""
     _val_idx = start_idx + 1
 
-    # Guard: stale wizard-step callbacks must not fire when the session is at the
-    # summary/confirm stage, and a stale confirm must not fire on an in-progress session.
     if action in {"pick", "toggle", "done", "custom"} and session_status == "confirm":
         logger.warning("Stale wizard callback %s on confirm-stage session, ignoring", action)
         await q.answer("Setup already complete. Confirm or Redo.", show_alert=False)
@@ -1373,9 +1427,8 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
     if action == "confirm":
-        data_dir = context.bot_data["data_dir"]
         profile = _build_profile_from_answers(chat_id, state.get("answers", {}))
-        save_profile(data_dir, profile)
+        await save_profile(profile)
         _setup_clear_state(context, chat_id)
         await q.message.reply_text(
             "Profile saved. Use /profile to view or paste an IOC to analyze."
@@ -1428,6 +1481,10 @@ async def handle_setup_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _send_setup_question(q.message, context, chat_id)
 
 
+# ---------------------------------------------------------------------------
+# Feedback handlers
+# ---------------------------------------------------------------------------
+
 async def handle_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not q or not q.data:
@@ -1438,16 +1495,17 @@ async def handle_feedback_callback(update: Update, context: ContextTypes.DEFAULT
         return
     action, decision_id = parts[1], parts[2]
     chat_id = q.message.chat_id if q.message else 0
-    data_dir = context.bot_data["data_dir"]
 
     if action == "agree":
-        update_feedback(data_dir, chat_id, decision_id, feedback="agree")
+        await update_feedback(chat_id, decision_id, feedback="agree")
+        feedback_total.labels(feedback_type="agree").inc()
         await q.answer("✅ Feedback saved. Thanks!")
         return
 
     fp = context.bot_data.setdefault("feedback_pending", {})
     if action == "disagree":
-        update_feedback(data_dir, chat_id, decision_id, feedback="disagree")
+        await update_feedback(chat_id, decision_id, feedback="disagree")
+        feedback_total.labels(feedback_type="disagree").inc()
         fp[chat_id] = {"kind": "feedback_note", "decision_id": decision_id}
         await q.answer()
         if q.message:
@@ -1456,7 +1514,8 @@ async def handle_feedback_callback(update: Update, context: ContextTypes.DEFAULT
             )
         return
     if action == "partial":
-        update_feedback(data_dir, chat_id, decision_id, feedback="partial")
+        await update_feedback(chat_id, decision_id, feedback="partial")
+        feedback_total.labels(feedback_type="partial").inc()
         fp[chat_id] = {"kind": "feedback_partial", "decision_id": decision_id}
         await q.answer()
         if q.message:
@@ -1475,16 +1534,15 @@ async def handle_feedback_pending_text(
     update: Update, context: ContextTypes.DEFAULT_TYPE, pending: dict[str, Any], text: str
 ) -> None:
     chat_id = update.effective_chat.id
-    data_dir = context.bot_data["data_dir"]
     decision_id = pending["decision_id"]
     kind = pending["kind"]
     context.bot_data["feedback_pending"].pop(chat_id, None)
     if kind == "feedback_note":
-        update_feedback(data_dir, chat_id, decision_id, note=text)
+        await update_feedback(chat_id, decision_id, note=text)
     elif kind == "feedback_partial":
-        update_feedback(data_dir, chat_id, decision_id, note=text)
+        await update_feedback(chat_id, decision_id, note=text)
     elif kind == "action_note":
-        update_feedback(data_dir, chat_id, decision_id, action_taken=text)
+        await update_feedback(chat_id, decision_id, action_taken=text)
     if update.effective_message:
         await update.effective_message.reply_text("Saved.")
 
@@ -1496,7 +1554,6 @@ async def handle_dialogue_reply(
     text: str,
 ) -> None:
     chat_id = update.effective_chat.id
-    data_dir = context.bot_data["data_dir"]
     answer = text.strip()
     if not answer:
         if update.effective_message:
@@ -1507,7 +1564,7 @@ async def handle_dialogue_reply(
     answered = len(sess.analyst_responses)
     total = len(sess.followup_questions)
     if answered < total:
-        put_session(sess, data_dir)
+        await put_session(sess)
         next_q = sess.followup_questions[answered]
         if update.effective_message:
             await update.effective_message.reply_text(
@@ -1515,12 +1572,11 @@ async def handle_dialogue_reply(
             )
         return
 
-    org_block = build_org_context(data_dir, chat_id)
+    org_block = await build_org_context(chat_id)
     entry = sess.enrichment_data
     past_block = ""
     if entry:
-        sim = find_similar_decisions(
-            data_dir,
+        sim = await find_similar_decisions(
             chat_id,
             entry.get("kind", ""),
             str(entry.get("ioc", "")),
@@ -1539,7 +1595,7 @@ async def handle_dialogue_reply(
         f"{ans}\n"
         "Given this context and enrichment, give a SPECIFIC, ACTIONABLE verdict."
     )
-    clear_session(chat_id, data_dir)
+    await clear_session(chat_id)
     await _run_llm_pipeline(
         update,
         context,
@@ -1569,19 +1625,19 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
                     return st
         except (TypeError, ValueError):
             pass
-    sessions = context.bot_data.get("setup_sessions", {})
-    for st in sessions.values():
+    sessions_map = context.bot_data.get("setup_sessions", {})
+    for st in sessions_map.values():
         if isinstance(st, dict) and int(st.get("origin_chat_id") or 0) == chat_id:
             return st
     if uid:
-        for st in sessions.values():
+        for st in sessions_map.values():
             if (
                 isinstance(st, dict)
                 and st.get("owner_user_id") == uid
                 and int(st.get("origin_chat_id") or 0) == chat_id
             ):
                 return st
-        for st in sessions.values():
+        for st in sessions_map.values():
             if (
                 isinstance(st, dict)
                 and st.get("owner_user_id") == uid
@@ -1597,7 +1653,7 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
                 cid = int(f.stem)
             except ValueError:
                 continue
-            if cid in sessions:
+            if cid in sessions_map:
                 continue
             loaded = _setup_state(context, cid)
             if loaded and int(loaded.get("origin_chat_id") or 0) == chat_id:
@@ -1622,8 +1678,8 @@ def _find_setup_state(context: ContextTypes.DEFAULT_TYPE, update: Update) -> dic
 def _has_incomplete_setup_session(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int | None
 ) -> bool:
-    sessions = context.bot_data.get("setup_sessions", {})
-    for st in sessions.values():
+    sessions_map = context.bot_data.get("setup_sessions", {})
+    for st in sessions_map.values():
         if not isinstance(st, dict):
             continue
         if str(st.get("status", "in_progress")) == "confirm":
@@ -1659,6 +1715,10 @@ async def _safe_edit_setup_markup(q, reply_markup: InlineKeyboardMarkup | None) 
         await q.edit_message_reply_markup(reply_markup=reply_markup)
 
 
+# ---------------------------------------------------------------------------
+# Main text handler
+# ---------------------------------------------------------------------------
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg or not msg.text:
@@ -1668,8 +1728,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = msg.text.strip()
     if not user_text:
         return
-
-    data_dir = context.bot_data["data_dir"]
 
     # --- SETUP SESSION GUARD (highest priority, single block) ---
     setup_st = _find_setup_state(context, update)
@@ -1714,7 +1772,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # 2) Dialogue follow-up session.
-    sess = get_session(chat_id, data_dir)
+    sess = await get_session(chat_id)
     if sess and sess.status == "awaiting_followup":
         await handle_dialogue_reply(update, context, sess, user_text)
         return
@@ -1729,6 +1787,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await process_ioc_pipeline(update, context, user_text)
 
 
+# ---------------------------------------------------------------------------
+# Application bootstrap
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     cfg = load_config()
     vt = VirusTotalClient(cfg.virustotal_api_key, timeout=cfg.http_timeout_seconds)
@@ -1737,13 +1799,31 @@ def main() -> None:
     urlscan = UrlscanClient(cfg.urlscan_api_key, timeout=cfg.http_timeout_seconds)
     otx = OTXClient(cfg.otx_api_key, timeout=cfg.http_timeout_seconds)
 
+    # Start Prometheus metrics server (non-blocking background thread)
+    start_metrics_server()
+
+    async def post_init(application: Application) -> None:
+        await init_db(cfg.database_url)
+        logger.info("Database ready")
+
+    async def post_shutdown(application: Application) -> None:
+        await close_db()
+
     request = HTTPXRequest(
         connect_timeout=45.0,
         read_timeout=45.0,
         write_timeout=45.0,
         pool_timeout=10.0,
     )
-    app = Application.builder().token(cfg.telegram_bot_token).request(request).concurrent_updates(False).build()
+    app = (
+        Application.builder()
+        .token(cfg.telegram_bot_token)
+        .request(request)
+        .concurrent_updates(False)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.bot_data["config"] = cfg
     app.bot_data["vt"] = vt
@@ -1756,6 +1836,9 @@ def main() -> None:
     app.bot_data["setup_sessions"] = {}
     app.bot_data["setup_active_by_user"] = {}
 
+    # User tracking middleware — runs for every update before other handlers
+    app.add_handler(TypeHandler(Update, track_user_update), group=-1)
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("setup", cmd_setup))
@@ -1767,6 +1850,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("clearhistory", cmd_clearhistory))
+    app.add_handler(CommandHandler("admin", cmd_admin))
     app.add_handler(CallbackQueryHandler(handle_setup_callback, pattern=r"^s:"))
     app.add_handler(CallbackQueryHandler(handle_feedback_callback, pattern=r"^f:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

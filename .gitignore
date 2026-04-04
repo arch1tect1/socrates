@@ -4,6 +4,7 @@
 data/profiles/
 data/decisions/
 data/dialogue_sessions/
+data/setup_sessions/
 .venv/
 venv/
 __pycache__/

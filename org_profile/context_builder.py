@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import html
 import ipaddress
-from pathlib import Path
 from typing import Any
 
 from prompts.load import load_org_context_footer, load_vpn_guidance
@@ -136,9 +135,9 @@ def apply_org_match_to_entry(entry: dict[str, Any], profile: OrgProfile | None) 
         entry["org_match"] = m
 
 
-def build_org_context(data_dir: Path, chat_id: int) -> str:
+async def build_org_context(chat_id: int) -> str:
     """Formatted block for LLM system user bundle (not the system prompt string itself)."""
-    p = load_profile(data_dir, chat_id)
+    p = await load_profile(chat_id)
     if not p or not (p.org_name or p.industry):
         return ""
 

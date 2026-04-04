@@ -1,9 +1,8 @@
-"""Find similar past decisions for LLM context."""
+"""Find similar past decisions for LLM context (async)."""
 
 from __future__ import annotations
 
 import ipaddress
-from pathlib import Path
 from typing import Any
 
 from prompts.load import load_past_decisions_footer
@@ -31,15 +30,14 @@ def _enrichment_summary_from_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def find_similar_decisions(
-    data_dir: Path,
+async def find_similar_decisions(
     chat_id: int,
     ioc_type: str,
     ioc_value: str,
     enrichment_entry: dict[str, Any],
     limit: int = 3,
 ) -> list[DecisionRecord]:
-    all_d = load_all_decisions(data_dir, chat_id)
+    all_d = await load_all_decisions(chat_id)
     if not all_d:
         return []
 

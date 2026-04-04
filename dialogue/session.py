@@ -1,12 +1,12 @@
-"""Per-chat dialogue session state (in-memory + optional disk for restarts)."""
+"""Per-chat dialogue session state (in-memory cache + PostgreSQL persistence)."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from sqlalchemy import delete, select
 
 
 @dataclass
@@ -26,11 +26,8 @@ class SessionState:
     ttl_seconds: int = 3600
 
 
+# In-memory cache for fast access
 sessions: dict[int, SessionState] = {}
-
-
-def _session_path(data_dir: Path, chat_id: int) -> Path:
-    return data_dir / "dialogue_sessions" / f"{chat_id}.json"
 
 
 def _parse_dt(raw: str) -> datetime:
@@ -69,77 +66,119 @@ def _state_from_dict(d: dict[str, Any]) -> SessionState:
     )
 
 
-def _write_session_file(data_dir: Path, state: SessionState) -> None:
-    path = _session_path(data_dir, state.chat_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(_state_to_jsonable(state), indent=2, default=str),
-        encoding="utf-8",
-    )
-
-
-def _read_session_file(data_dir: Path, chat_id: int) -> SessionState | None:
-    path = _session_path(data_dir, chat_id)
-    if not path.is_file():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    try:
-        state = _state_from_dict(raw)
-    except (KeyError, TypeError, ValueError):
-        return None
-    age = (datetime.now(timezone.utc) - state.created_at).total_seconds()
-    if age > state.ttl_seconds:
-        path.unlink(missing_ok=True)
-        return None
-    return state
-
-
-def _delete_session_file(data_dir: Path, chat_id: int) -> None:
-    path = _session_path(data_dir, chat_id)
-    path.unlink(missing_ok=True)
-
-
 def _is_expired(state: SessionState) -> bool:
     age = (datetime.now(timezone.utc) - state.created_at).total_seconds()
     return age > state.ttl_seconds
 
 
-def get_session(chat_id: int, data_dir: Path | None = None) -> SessionState | None:
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
+async def _write_session_db(state: SessionState) -> None:
+    from database.crud import get_or_create_user
+    from database.engine import get_async_session
+    from database.models import SessionDB, UserDB
+
+    user_id = await get_or_create_user(state.chat_id)
+    expires_at = state.created_at + timedelta(seconds=state.ttl_seconds)
+    state_dict = _state_to_jsonable(state)
+
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(SessionDB).where(
+                SessionDB.user_id == user_id,
+                SessionDB.session_type == "dialogue",
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.state = state_dict
+            existing.expires_at = expires_at
+        else:
+            session.add(
+                SessionDB(
+                    user_id=user_id,
+                    session_type="dialogue",
+                    state=state_dict,
+                    expires_at=expires_at,
+                )
+            )
+        await session.commit()
+
+
+async def _read_session_db(chat_id: int) -> SessionState | None:
+    from database.engine import get_async_session
+    from database.models import SessionDB, UserDB
+
+    async with get_async_session() as session:
+        result = await session.execute(
+            select(SessionDB)
+            .join(UserDB)
+            .where(
+                UserDB.telegram_user_id == chat_id,
+                SessionDB.session_type == "dialogue",
+            )
+        )
+        row = result.scalar_one_or_none()
+        if not row or not row.state:
+            return None
+        try:
+            return _state_from_dict(row.state)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+async def _delete_session_db(chat_id: int) -> None:
+    from database.engine import get_async_session
+    from database.models import SessionDB, UserDB
+
+    async with get_async_session() as session:
+        user_result = await session.execute(
+            select(UserDB.id).where(UserDB.telegram_user_id == chat_id)
+        )
+        user_id = user_result.scalar_one_or_none()
+        if user_id:
+            await session.execute(
+                delete(SessionDB).where(
+                    SessionDB.user_id == user_id,
+                    SessionDB.session_type == "dialogue",
+                )
+            )
+            await session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Public API (async, memory + DB write-through)
+# ---------------------------------------------------------------------------
+
+async def get_session(chat_id: int) -> SessionState | None:
     s = sessions.get(chat_id)
     if s:
         if _is_expired(s):
             sessions.pop(chat_id, None)
-            if data_dir is not None:
-                _delete_session_file(data_dir, chat_id)
+            await _delete_session_db(chat_id)
             return None
         return s
 
-    if data_dir is not None:
-        loaded = _read_session_file(data_dir, chat_id)
-        if loaded:
-            if _is_expired(loaded):
-                _delete_session_file(data_dir, chat_id)
-                return None
-            sessions[chat_id] = loaded
-            return loaded
+    loaded = await _read_session_db(chat_id)
+    if loaded:
+        if _is_expired(loaded):
+            await _delete_session_db(chat_id)
+            return None
+        sessions[chat_id] = loaded
+        return loaded
     return None
 
 
-def put_session(state: SessionState, data_dir: Path | None = None) -> None:
+async def put_session(state: SessionState) -> None:
     sessions[state.chat_id] = state
-    if data_dir is not None:
-        _write_session_file(data_dir, state)
+    await _write_session_db(state)
 
 
-def clear_session(chat_id: int, data_dir: Path | None = None) -> None:
+async def clear_session(chat_id: int) -> None:
     sessions.pop(chat_id, None)
-    if data_dir is not None:
-        _delete_session_file(data_dir, chat_id)
+    await _delete_session_db(chat_id)
 
 
 def purge_expired() -> None:

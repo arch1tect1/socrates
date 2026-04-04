@@ -26,6 +26,8 @@ class Config:
     anthropic_api_key: str | None
     openai_api_key: str | None
     data_dir: Path
+    database_url: str
+    admin_telegram_id: int
     http_timeout_seconds: float = 30.0
 
 
@@ -38,6 +40,8 @@ def load_config() -> Config:
     otx = os.getenv("OTX_API_KEY", "").strip()
     anthropic = os.getenv("ANTHROPIC_API_KEY", "").strip() or None
     openai = os.getenv("OPENAI_API_KEY", "").strip() or None
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    admin_telegram_id = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 
     missing = []
     if not telegram:
@@ -46,6 +50,8 @@ def load_config() -> Config:
         missing.append("VIRUSTOTAL_API_KEY")
     if not anthropic and not openai:
         missing.append("ANTHROPIC_API_KEY or OPENAI_API_KEY")
+    if not database_url:
+        missing.append("DATABASE_URL")
     if missing:
         raise ValueError(
             "Missing required environment variables: " + ", ".join(missing)
@@ -66,4 +72,6 @@ def load_config() -> Config:
         anthropic_api_key=anthropic,
         openai_api_key=openai,
         data_dir=data_dir,
+        database_url=database_url,
+        admin_telegram_id=admin_telegram_id,
     )
