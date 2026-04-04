@@ -371,10 +371,7 @@ async def _send_verdict_with_memory(
     if v:
         verdicts_total.labels(verdict=v.lower()).inc()
 
-    src_line = f"LLM: {llm_source}" if llm_source else ""
-    formatted = format_telegram_report(
-        analysis, title="SOCrates", llm_source=src_line or None
-    )
+    formatted = format_telegram_report(analysis, title="SOCrates")
     chunks = _chunk_message(formatted)
     for i, chunk in enumerate(chunks):
         rm = (
