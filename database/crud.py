@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+BAKU_TZ = timezone(timedelta(hours=4))
+
 from sqlalchemy import delete, func, select
 
 from .engine import get_async_session
@@ -24,7 +26,7 @@ async def get_or_create_user(
         )
         user = result.scalar_one_or_none()
         if user:
-            user.last_active_at = datetime.now(timezone.utc)
+            user.last_active_at = datetime.now(BAKU_TZ)
             if username is not None:
                 user.username = username
             if first_name is not None:
@@ -55,7 +57,7 @@ async def update_user_activity(telegram_user_id: int) -> None:
         )
         user = result.scalar_one_or_none()
         if user:
-            user.last_active_at = datetime.now(timezone.utc)
+            user.last_active_at = datetime.now(BAKU_TZ)
             await session.commit()
 
 
@@ -73,7 +75,7 @@ async def get_user_id(telegram_user_id: int) -> int | None:
 # ---------------------------------------------------------------------------
 
 async def get_admin_stats() -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(BAKU_TZ)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = now - timedelta(days=7)
 

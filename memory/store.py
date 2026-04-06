@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+BAKU_TZ = timezone(timedelta(hours=4))
 
 from sqlalchemy import delete, func, select
 
@@ -125,4 +127,4 @@ def parse_verdict_lines(llm_text: str) -> tuple[str, str]:
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(BAKU_TZ).strftime("%Y-%m-%dT%H:%M:%S+04:00")

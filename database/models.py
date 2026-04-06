@@ -12,8 +12,11 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
+
+BAKU_NOW = text("(NOW() AT TIME ZONE 'Asia/Baku')")
 
 
 class Base(DeclarativeBase):

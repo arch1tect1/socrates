@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+
+BAKU_TZ = timezone(timedelta(hours=4))
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -22,7 +24,7 @@ class SessionState:
     followup_questions: list[str]
     analyst_responses: list[str] = field(default_factory=list)
     status: str = "awaiting_followup"
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(BAKU_TZ))
     ttl_seconds: int = 3600
 
 
@@ -36,7 +38,7 @@ def _parse_dt(raw: str) -> datetime:
         s = s[:-1] + "+00:00"
     dt = datetime.fromisoformat(s)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=BAKU_TZ)
     return dt
 
 
@@ -48,7 +50,7 @@ def _state_to_jsonable(state: SessionState) -> dict[str, Any]:
 
 def _state_from_dict(d: dict[str, Any]) -> SessionState:
     ca = d.get("created_at", "")
-    created_at = _parse_dt(ca) if isinstance(ca, str) and ca else datetime.now(timezone.utc)
+    created_at = _parse_dt(ca) if isinstance(ca, str) and ca else datetime.now(BAKU_TZ)
     return SessionState(
         chat_id=int(d["chat_id"]),
         original_input=str(d.get("original_input", "")),
@@ -67,7 +69,7 @@ def _state_from_dict(d: dict[str, Any]) -> SessionState:
 
 
 def _is_expired(state: SessionState) -> bool:
-    age = (datetime.now(timezone.utc) - state.created_at).total_seconds()
+    age = (datetime.now(BAKU_TZ) - state.created_at).total_seconds()
     return age > state.ttl_seconds
 
 
@@ -182,7 +184,7 @@ async def clear_session(chat_id: int) -> None:
 
 
 def purge_expired() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(BAKU_TZ)
     dead = [
         cid
         for cid, s in sessions.items()

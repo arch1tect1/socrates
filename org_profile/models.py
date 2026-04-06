@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+BAKU_TZ = timezone(timedelta(hours=4))
 from typing import Any
 
 
@@ -46,4 +48,4 @@ class OrgProfile:
         )
 
     def touch(self) -> None:
-        self.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.updated_at = datetime.now(BAKU_TZ).strftime("%Y-%m-%dT%H:%M:%S+04:00")
