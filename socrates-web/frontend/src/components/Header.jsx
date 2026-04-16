@@ -29,7 +29,7 @@ export default function Header({ onReset }) {
         <button
           type="button"
           onClick={goHome}
-          aria-label="SOCrates home — clear and start over"
+          aria-label="SOCrates home - clear and start over"
           className="flex items-center gap-2.5 sm:gap-3 justify-self-start text-left relative z-[2] transition-opacity duration-200 hover:opacity-80"
           style={{ cursor: "pointer", background: "none", border: "none", padding: 0 }}
         >

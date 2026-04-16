@@ -8,7 +8,6 @@ import CacheBanner from "./components/CacheBanner";
 import EnrichmentCard from "./components/EnrichmentCard";
 import VerdictPanel from "./components/VerdictPanel";
 import History from "./components/History";
-import SetupIntroCard from "./components/SetupIntroCard";
 import useAnalysis from "./hooks/useAnalysis";
 import { getSessionId } from "./lib/session";
 
@@ -28,7 +27,6 @@ export default function App() {
   } = useAnalysis();
 
   const [history, setHistory] = useState([]);
-  const [setupTelegramHint, setSetupTelegramHint] = useState(false);
   const [resetKey, setResetKey] = useState(0);
   const resetAnalysisRef = useRef(resetAnalysis);
   resetAnalysisRef.current = resetAnalysis;
@@ -114,33 +112,6 @@ export default function App() {
 
         <IOCInput key={resetKey} onSubmit={handleSubmit} isLoading={isLoading} />
 
-        <SetupIntroCard onChooseStart={() => setSetupTelegramHint(true)} />
-
-        {setupTelegramHint && (
-          <div
-            className="max-w-3xl mx-auto rounded-lg px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2"
-            style={{
-              background: "rgba(34,211,238,0.08)",
-              border: "1px solid rgba(34,211,238,0.25)",
-              color: "var(--text-secondary)",
-            }}
-          >
-            <span>
-              Organization profile: open the <strong style={{ color: "var(--text-primary)" }}>Telegram bot</strong>{" "}
-              and send <code className="text-[11px]">/setup</code> to finish quick setup there. The web app keeps
-              using generic context until you do.
-            </span>
-            <button
-              type="button"
-              className="text-[11px] font-medium shrink-0 px-2 py-1 rounded"
-              style={{ color: "#22d3ee", border: "1px solid rgba(34,211,238,0.4)" }}
-              onClick={() => setSetupTelegramHint(false)}
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
         {error && (
           <div className="card animate-fade-in-up text-center max-w-3xl mx-auto" style={{ borderColor: "#ef4444" }}>
             <p className="text-sm" style={{ color: "#ef4444" }}>{error}</p>
@@ -208,7 +179,7 @@ export default function App() {
         className="text-center py-6 text-xs"
         style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border)" }}
       >
-        SOCrates v1.0 — AI-Powered IOC Triage Platform
+        SOCrates v1.0 - AI-Powered IOC Triage Platform
       </footer>
 
       <Analytics />

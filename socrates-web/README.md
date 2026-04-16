@@ -1,4 +1,4 @@
-# SOCrates — AI-Powered IOC Triage Platform
+# SOCrates - AI-Powered IOC Triage Platform
 
 A web-based threat intelligence triage tool. Paste an IOC (IP, domain, URL, or file hash), and SOCrates enriches it across multiple threat intel sources in real-time, then delivers an AI-powered verdict with cross-referenced reasoning.
 
