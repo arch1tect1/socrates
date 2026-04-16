@@ -90,10 +90,13 @@ export default function App() {
   const iocType = currentIOC ? detectTypeClient(currentIOC) : null;
 
   return (
-    <div className="min-h-screen" style={{ background: "var(--bg-primary)" }}>
+    <div
+      className="min-h-screen flex flex-col w-full"
+      style={{ background: "var(--bg-primary)" }}
+    >
       <Header onReset={handleReset} />
 
-      <main className="max-w-6xl mx-auto px-6 py-12 space-y-6">
+      <main className="flex-1 w-full max-w-6xl mx-auto px-6 py-12 space-y-6">
         {/* Hero */}
         {!isLoading && !showResults && (
           <div className="text-center mb-8 animate-fade-in-up">
@@ -176,8 +179,12 @@ export default function App() {
       </main>
 
       <footer
-        className="text-center py-6 text-xs"
-        style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border)" }}
+        className="shrink-0 mt-auto text-center py-6 text-xs w-full"
+        style={{
+          color: "var(--text-muted)",
+          borderTop: "1px solid var(--border)",
+          background: "color-mix(in srgb, var(--bg-primary) 92%, transparent)",
+        }}
       >
         SOCrates v1.0 - AI-Powered IOC Triage Platform
       </footer>
