@@ -530,23 +530,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_message:
         return
     text = (
-        "🛡 SOCrates — your AI SOC teammate\n\n"
-        "Send me any IP, domain, file hash, or raw log/alert — I'll enrich it and give you "
-        "a threat verdict with MITRE ATT&amp;CK mapping and recommended actions.\n\n"
-        "⚙️ <b>FIRST TIME?</b> Set up your organization profile for smarter, context-aware "
-        "verdicts:\n"
-        "→ <code>/setup</code> — Configure your org policies, cloud providers, and protected "
-        "assets (recommended for teams)\n\n"
-        "Skip <code>/setup</code> if you're using SOCrates for personal research — I'll still "
-        "analyze IOCs, just without org-specific recommendations.\n\n"
+        "Welcome to SOCrates! 🔍\n\n"
+        "I'm your AI SOC teammate — send any IP, domain, file hash, or raw log/alert and I'll "
+        "enrich it and return a verdict with MITRE ATT&amp;CK mapping and recommended actions.\n\n"
+        "<b>Before we start,</b> I can ask you a few quick questions about your environment to "
+        "make triage recommendations more accurate.\n\n"
+        "<i>For example:</i> the same IP flagged by AbuseIPDB means different things for a bank "
+        "vs a gaming startup.\n\n"
+        "Type <code>/setup</code> to customize, or just paste any IOC to start analyzing right "
+        "away with default settings.\n\n"
         "📌 <b>COMMANDS:</b>\n"
-        "/setup — Set up organization profile\n"
+        "/setup — Organization profile (recommended for teams)\n"
         "/profile — View your current profile\n"
         "/addpolicy — Add a custom security policy\n"
         "/help — Show supported input types and examples\n"
         "/history — View past analyses\n"
         "/stats — View analysis statistics\n\n"
-        "Just paste any IOC and send — no commands needed."
+        "Paste an IOC anytime — no command required."
     )
     await update.effective_message.reply_html(text)
 
@@ -593,6 +593,16 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "last_prompt_signature": None,
     }
     _setup_save_state(context, chat_id, new_state)
+    intro = (
+        "⚙️ <b>Quick setup (optional, ~30 seconds)</b>\n\n"
+        "Answer a few questions about your environment so SOCrates can tailor triage "
+        "recommendations to your context.\n\n"
+        "<i>For example:</i> a bank seeing traffic to a crypto mining pool might rate it "
+        "CRITICAL; a crypto company might treat the same IOC as normal.\n\n"
+        "Your answers help the AI make smarter, context-aware decisions. Reply below to begin — "
+        "or paste an IOC anytime to analyze with defaults until you finish setup."
+    )
+    await update.effective_message.reply_html(intro)
     await _send_setup_question(update.effective_message, context, chat_id)
 
 
