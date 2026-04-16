@@ -30,16 +30,28 @@ def _get_client():
         return _client
 
     url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    service = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    key = service or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 
     if not url or not key:
         logger.info("Supabase not configured — caching disabled")
         return None
 
+    if not service:
+        logger.warning(
+            "Supabase: SUPABASE_SERVICE_ROLE_KEY is not set; using anon key. "
+            "Inserts usually fail when Row Level Security is enabled on ioc_queries "
+            "(dashboard shows rows only in Table Editor as postgres). "
+            "Set SUPABASE_SERVICE_ROLE_KEY on the server (Vercel env, etc.)."
+        )
+
     try:
         from supabase import create_client
         _client = create_client(url, key)
-        logger.info("Supabase cache client initialised")
+        logger.info(
+            "Supabase cache client initialised (%s)",
+            "service_role" if service else "anon_key_fallback",
+        )
         return _client
     except Exception as e:
         logger.warning(f"Failed to create Supabase client: {e}")
@@ -192,7 +204,15 @@ async def save_results(
         return query_id
 
     except Exception as e:
-        logger.warning(f"Failed to save results: {e}")
+        msg = str(e).lower()
+        if "row-level security" in msg or "rls" in msg or "42501" in msg:
+            logger.warning(
+                "Failed to save results (RLS or permission): %s. "
+                "Use SUPABASE_SERVICE_ROLE_KEY on this server, or relax RLS on cache tables.",
+                e,
+            )
+        else:
+            logger.warning("Failed to save results: %s", e)
         return None
 
 

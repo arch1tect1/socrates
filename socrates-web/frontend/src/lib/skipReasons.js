@@ -2,15 +2,15 @@
 
 const SOURCE_IOC_SUPPORT = {
   VirusTotal: new Set(["ip", "domain", "url", "hash"]),
-  Shodan: new Set(["ip"]),
-  AbuseIPDB: new Set(["ip"]),
+  Shodan: new Set(["ip", "domain"]),
+  AbuseIPDB: new Set(["ip", "domain"]),
   "OTX AlienVault": new Set(["ip", "domain", "hash"]),
   "URLScan.io": new Set(["domain", "url"]),
 };
 
 const SKIP_FALLBACK = {
-  Shodan: "IP queries only",
-  AbuseIPDB: "IP queries only",
+  Shodan: "IP and domain lookups only",
+  AbuseIPDB: "IP and domain lookups only",
   "OTX AlienVault": "Not supported for this IOC type",
   "URLScan.io": "Domains and URLs only",
 };

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 import time
 
 import httpx
@@ -8,17 +10,38 @@ import httpx
 BASE = "https://api.abuseipdb.com/api/v2"
 
 
+async def _resolve_domain(domain: str) -> str | None:
+    """Resolve hostname to IPv4 (same approach as AbuseIPDB web UI)."""
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(
+            None, socket.getaddrinfo, domain, None, socket.AF_INET
+        )
+        if results:
+            return results[0][4][0]
+    except socket.gaierror:
+        pass
+    return None
+
+
 async def query(ioc: str, ioc_type: str) -> dict:
     api_key = os.getenv("ABUSEIPDB_API_KEY", "")
     if not api_key:
         return {"error": "ABUSEIPDB_API_KEY not configured"}
 
-    if ioc_type != "ip":
-        return {"skipped": True, "reason": "AbuseIPDB only supports IP lookups"}
+    if ioc_type not in ("ip", "domain"):
+        return {"skipped": True, "reason": "AbuseIPDB only supports IP and domain lookups"}
 
     start = time.time()
+    target_ip = ioc
+    if ioc_type == "domain":
+        resolved = await _resolve_domain(ioc)
+        if not resolved:
+            return {"error": "Could not resolve domain to an IPv4 address for AbuseIPDB"}
+        target_ip = resolved
+
     headers = {"Key": api_key, "Accept": "application/json"}
-    params = {"ipAddress": ioc, "maxAgeInDays": "90", "verbose": ""}
+    params = {"ipAddress": target_ip, "maxAgeInDays": "90", "verbose": ""}
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(f"{BASE}/check", headers=headers, params=params)
@@ -45,7 +68,7 @@ async def query(ioc: str, ioc_type: str) -> dict:
         for cat in report.get("categories", []):
             category_names.add(cat)
 
-    return {
+    out: dict = {
         "abuse_confidence_score": score,
         "severity": severity,
         "total_reports": data.get("totalReports", 0),
@@ -58,3 +81,10 @@ async def query(ioc: str, ioc_type: str) -> dict:
         "abuse_categories": sorted(category_names),
         "elapsed": round(time.time() - start, 2),
     }
+    if ioc_type == "domain":
+        out["resolved_from"] = ioc
+        out["abuse_lookup_ip"] = target_ip
+        out["source_note"] = (
+            f"AbuseIPDB API checks IPs only; resolved {ioc} → {target_ip} for this lookup."
+        )
+    return out

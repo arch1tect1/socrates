@@ -252,11 +252,17 @@ function AbuseDetails({ data }) {
   const color = abuseColor(score);
   return (
     <div className="space-y-1 pt-1">
+      {data.source_note && (
+        <p className="text-xs mb-2 py-1.5 px-3 rounded" style={{ background: "rgba(34,211,238,0.06)", color: "var(--accent-cyan)" }}>
+          {data.source_note}
+        </p>
+      )}
       <div className="flex items-center gap-3 mb-2">
         <div className="relative flex-1 h-2 rounded-full overflow-hidden" style={{ background: "var(--border)" }}>
           <div className="absolute left-0 top-0 h-full rounded-full transition-all duration-700" style={{ width: `${score}%`, background: color }} />
         </div>
       </div>
+      {data.abuse_lookup_ip && <DataRow label="Queried IP" value={data.abuse_lookup_ip} />}
       <DataRow label="ISP" value={data.isp} />
       <DataRow label="Usage Type" value={data.usage_type} />
       <DataRow label="Domain" value={data.domain} />

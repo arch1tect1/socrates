@@ -5,15 +5,15 @@ from __future__ import annotations
 # IOC types each source handles (for UX when status is skipped but reason missing)
 SOURCE_IOC_SUPPORT: dict[str, frozenset[str]] = {
     "VirusTotal": frozenset({"ip", "domain", "url", "hash"}),
-    "Shodan": frozenset({"ip"}),
-    "AbuseIPDB": frozenset({"ip"}),
+    "Shodan": frozenset({"ip", "domain"}),
+    "AbuseIPDB": frozenset({"ip", "domain"}),
     "OTX AlienVault": frozenset({"ip", "domain", "hash"}),
     "URLScan.io": frozenset({"domain", "url"}),
 }
 
 SKIP_FALLBACK: dict[str, str] = {
-    "Shodan": "IP queries only",
-    "AbuseIPDB": "IP queries only",
+    "Shodan": "IP and domain lookups only",
+    "AbuseIPDB": "IP and domain lookups only",
     "OTX AlienVault": "Not supported for this IOC type",
     "URLScan.io": "Domains and URLs only",
 }

@@ -1,0 +1,19 @@
+-- SOCrates: cache rows not appearing in ioc_queries / enrichment_results
+--
+-- Typical cause: Row Level Security is ON, but the API uses only the anon key.
+-- The service_role JWT bypasses RLS; the anon key does not.
+--
+-- RECOMMENDED (production):
+--   1. Supabase → Project Settings → API → copy "service_role" secret (not anon).
+--   2. Hosting (e.g. Vercel) → Environment Variables:
+--        SUPABASE_URL=https://xxxx.supabase.co
+--        SUPABASE_SERVICE_ROLE_KEY=<service_role JWT>
+--  3. Redeploy. Do NOT expose service_role in the browser or NEXT_PUBLIC_*.
+--
+-- OPTIONAL (dev / private project only): turn off RLS on cache tables so anon inserts work.
+-- Less safe if the anon key is ever exposed. Prefer service_role instead.
+
+-- Uncomment only if you understand the tradeoff:
+-- ALTER TABLE public.ioc_queries DISABLE ROW LEVEL SECURITY;
+-- ALTER TABLE public.enrichment_results DISABLE ROW LEVEL SECURITY;
+-- ALTER TABLE public.ai_verdicts DISABLE ROW LEVEL SECURITY;

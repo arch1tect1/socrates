@@ -56,15 +56,26 @@ async def query(ioc: str, ioc_type: str) -> dict:
             if "No information available" in msg:
                 return {"error": "No Shodan data found for this host"}
 
-            # Free plan can't query many IPs — try InternetDB (free, no key)
+            # Paid host API often required — try InternetDB (free, keyless)
             fallback = await _internetdb_fallback(client, target_ip)
             if fallback:
                 fallback["elapsed"] = round(time.time() - start, 2)
-                fallback["note"] = f"Via InternetDB (Shodan host API: {msg})"
+                fallback["note"] = (
+                    f"Via Shodan InternetDB (host API returned: {msg}). "
+                    "Upgrade Shodan for full host details on this IP."
+                )
                 if ioc_type == "domain":
                     fallback["resolved_from"] = ioc
                 return fallback
 
+            msg_l = msg.lower()
+            if "membership" in msg_l or "upgrade" in msg_l or "paid" in msg_l or "subscribe" in msg_l:
+                return {
+                    "error": (
+                        f"Shodan host lookup requires a paid Shodan plan for this IP ({msg}). "
+                        "InternetDB had no public record. Try another source or upgrade at shodan.io."
+                    )
+                }
             return {"error": f"Shodan: {msg}"}
 
         data = resp.json()
