@@ -184,6 +184,8 @@ export default function App() {
                   status={s.status}
                   data={enrichments[s.source]}
                   error={s.error}
+                  skip_reason={s.skip_reason}
+                  iocType={iocType}
                   delay={i * 50}
                 />
               ))}

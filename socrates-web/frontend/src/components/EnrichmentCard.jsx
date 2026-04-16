@@ -1,6 +1,7 @@
-import { ChevronDown, ChevronRight, ExternalLink, Globe, Shield, AlertTriangle, Radio, Scan } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, Globe, Shield, AlertTriangle, Radio, Scan, Info, SkipForward } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { linkifyCVEs } from "./CVELink";
+import { skipReasonForSource } from "../lib/skipReasons";
 
 const SOURCE_ICONS = {
   VirusTotal: Shield,
@@ -336,13 +337,50 @@ function relativeTime(dateStr) {
 
 /* ── Main card component ── */
 
-export default function EnrichmentCard({ source, data, status, error, delay = 0 }) {
+export default function EnrichmentCard({ source, data, status, error, skip_reason: skipReason, iocType, delay = 0 }) {
   const [expanded, setExpanded] = useState(false);
   const Icon = SOURCE_ICONS[source] || Globe;
   const StatsComponent = STATS_MAP[source];
   const DetailsComponent = DETAILS_MAP[source];
 
-  if (status === "skipped") return null;
+  if (status === "skipped") {
+    const reason = skipReason || skipReasonForSource(source, iocType);
+    return (
+      <div
+        className="compact-card"
+        style={{
+          animationDelay: `${delay}ms`,
+          animation: `stagger-fade-in 0.35s ease-out ${delay}ms both`,
+          borderColor: "rgba(71,85,105,0.35)",
+          background: "rgba(15,23,42,0.25)",
+        }}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2.5">
+            <SkipForward size={16} style={{ color: "#64748b" }} />
+            <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>{source}</span>
+            <span
+              className="pill text-[9px] !py-0.5 !px-2"
+              style={{
+                background: "rgba(71,85,105,0.2)",
+                border: "1px solid rgba(71,85,105,0.4)",
+                color: "#475569",
+              }}
+            >
+              Skipped
+            </span>
+          </div>
+        </div>
+        <p className="text-xs mt-2 flex items-start gap-1.5 leading-relaxed" style={{ color: "#475569" }}>
+          <Info size={13} className="flex-shrink-0 mt-0.5 opacity-80" aria-hidden />
+          <span className="italic" style={{ color: "#64748b" }}>
+            {reason}
+          </span>
+        </p>
+      </div>
+    );
+  }
+
   if (status !== "complete" && status !== "error") return null;
 
   return (
