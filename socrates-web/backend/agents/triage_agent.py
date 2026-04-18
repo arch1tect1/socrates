@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -151,9 +152,18 @@ async def _anthropic_messages(
 
 
 def _status_for_verdict(verdict: str, confidence: float) -> str:
-    """Map agent verdict to alert workflow status."""
-    v = (verdict or "").lower()
-    c = float(confidence or 0.0)
+    """Map agent verdict to alert workflow status.
+
+    - malicious with high confidence -> escalated (needs human action)
+    - suspicious -> investigating (human should review agent's work)
+    - benign with high confidence -> resolved (auto-close)
+    - inconclusive or low-confidence malicious/benign -> investigating
+    """
+    v = (verdict or "").strip().lower()
+    try:
+        c = float(confidence or 0.0)
+    except (TypeError, ValueError):
+        c = 0.0
     if v == "malicious" and c >= 0.75:
         return "escalated"
     if v == "benign" and c >= 0.85:
@@ -161,6 +171,14 @@ def _status_for_verdict(verdict: str, confidence: float) -> str:
     if v == "suspicious":
         return "investigating"
     return "investigating"
+
+
+def _insert_verdict_row_sync(sb: Any, row: dict[str, Any]) -> None:
+    sb.table("verdicts").insert(row).execute()
+
+
+def _update_alert_status_sync(sb: Any, alert_id: UUID, new_status: str) -> Any:
+    return sb.table("alerts").update({"status": new_status}).eq("id", str(alert_id)).execute()
 
 
 async def _save_verdict(
@@ -184,10 +202,10 @@ async def _save_verdict(
         "agent_trace": agent_trace,
     }
     try:
-        sb.table("verdicts").insert(row).execute()
+        await asyncio.to_thread(_insert_verdict_row_sync, sb, row)
         logger.info("triage: verdict saved alert_id=%s verdict=%s", alert_id, verdict_data["verdict"])
-    except Exception as e:
-        logger.exception("triage: verdict insert failed: %s", e)
+    except Exception:
+        logger.exception("triage: verdict insert failed alert_id=%s", alert_id)
         return
 
     new_status = _status_for_verdict(
@@ -195,10 +213,15 @@ async def _save_verdict(
         float(verdict_data.get("confidence") or 0),
     )
     try:
-        sb.table("alerts").update({"status": new_status}).eq("id", str(alert_id)).execute()
+        await asyncio.to_thread(_update_alert_status_sync, sb, alert_id, new_status)
+        # PostgREST may return an empty body for UPDATE even when rows matched; verify status in DB if unsure.
         logger.info("triage: alert status -> %s alert_id=%s", new_status, alert_id)
-    except Exception as e:
-        logger.exception("triage: alert status update failed (verdict saved): %s", e)
+    except Exception:
+        logger.exception(
+            "triage: alert status update failed (verdict row was saved) alert_id=%s target_status=%s",
+            alert_id,
+            new_status,
+        )
 
 
 async def investigate(alert_id: UUID | str) -> None:
