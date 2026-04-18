@@ -1,5 +1,44 @@
 import { ChevronDown } from "lucide-react";
 
+/** One-line preview for collapsed <details> headers */
+function iterationPreview(step) {
+  const sr = (step.stop_reason || "").toLowerCase();
+  const blocks = step.content || [];
+
+  if (sr === "end_turn") {
+    const textBlock = blocks.find((b) => b.type === "text");
+    if (textBlock?.text) {
+      const t = String(textBlock.text).trim();
+      return t.length > 100 ? `${t.slice(0, 100)}…` : t || "Final verdict";
+    }
+    return "Final verdict";
+  }
+
+  const toolBlock = blocks.find((b) => b.type === "tool_use");
+  const textBlock = blocks.find((b) => b.type === "text");
+  const inp = toolBlock?.input && typeof toolBlock.input === "object" ? toolBlock.input : {};
+  const toolName = toolBlock?.name;
+  const iocValue =
+    inp.ioc_value ?? inp.ip ?? inp.domain ?? inp.url ?? (Object.keys(inp).length ? "…" : null);
+
+  let reasoningPreview = null;
+  if (textBlock?.text) {
+    const t = String(textBlock.text).trim();
+    reasoningPreview = t.length > 80 ? `${t.slice(0, 80)}…` : t;
+  }
+
+  if (reasoningPreview && toolName) {
+    return `${reasoningPreview}  →  ${toolName}(${iocValue ?? "…"})`;
+  }
+  if (toolName) {
+    return `${toolName}(${iocValue ?? "…"})`;
+  }
+  if (reasoningPreview) {
+    return reasoningPreview;
+  }
+  return "";
+}
+
 function BlockContent({ block }) {
   if (!block || typeof block !== "object") return null;
   if (block.type === "text") {
@@ -45,15 +84,17 @@ export default function AgentTraceViewer({ verdict }) {
 
   return (
     <div className="space-y-4">
-      {trace.map((step, idx) => (
+      {trace.map((step, idx) => {
+        const preview = iterationPreview(step);
+        return (
         <details
           key={idx}
           className="group card open:border-cyan-500/30"
           open={idx < 3}
         >
-          <summary className="cursor-pointer list-none flex items-center gap-2 font-medium text-sm select-none">
+          <summary className="cursor-pointer list-none flex items-center gap-2 gap-y-1 font-medium text-sm select-none flex-wrap">
             <ChevronDown className="w-4 h-4 shrink-0 transition-transform group-open:rotate-180 text-cyan-400/80" />
-            <span style={{ color: "var(--text-primary)" }}>
+            <span style={{ color: "var(--text-primary)" }} className="shrink-0">
               Iteration {(step.iteration ?? idx) + 1}
               {step.stop_reason && (
                 <span className="ml-2 text-xs font-normal opacity-70">
@@ -61,6 +102,15 @@ export default function AgentTraceViewer({ verdict }) {
                 </span>
               )}
             </span>
+            {preview ? (
+              <span
+                className="text-xs font-mono truncate flex-1 min-w-[12rem] max-w-full pl-1"
+                style={{ color: "var(--text-muted)" }}
+                title={preview}
+              >
+                {preview}
+              </span>
+            ) : null}
           </summary>
           <div className="mt-3 pl-6 space-y-3 border-l-2 border-cyan-500/20 ml-1.5">
             {(step.content || []).map((block, j) => (
@@ -70,7 +120,8 @@ export default function AgentTraceViewer({ verdict }) {
             ))}
           </div>
         </details>
-      ))}
+        );
+      })}
 
       <div
         className="rounded-xl border p-4 mt-6"

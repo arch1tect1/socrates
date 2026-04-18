@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Body, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Query
 
 from ..agents import triage_agent
+from ..cache import get_supabase_client
 from ..models.alerts import (
     AlertResponse,
     AlertStatus,
@@ -50,6 +53,49 @@ async def manual_submit(
     alert = alert_ingestion.ingest(payload, parser_hint="manual")
     background_tasks.add_task(triage_agent.investigate, alert.id)
     return alert
+
+
+@router.post("/admin/reprocess-stuck")
+async def reprocess_stuck_alerts(
+    background_tasks: BackgroundTasks,
+    older_than_minutes: int = Query(10, ge=1, le=10080),
+    x_socrates_admin_secret: str | None = Header(None, alias="X-SOCrates-Admin-Secret"),
+) -> dict:
+    """
+    Queue triage for alerts that have no verdict row and are older than the cutoff.
+    Optional: set SOCRATES_ADMIN_SECRET and send the same value in header X-SOCrates-Admin-Secret.
+    """
+    expected = os.getenv("SOCRATES_ADMIN_SECRET", "").strip()
+    if expected and (not x_socrates_admin_secret or x_socrates_admin_secret != expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing admin secret")
+
+    sb = get_supabase_client()
+    if sb is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+    try:
+        res = sb.rpc(
+            "find_alerts_without_verdict",
+            {"cutoff": cutoff.isoformat()},
+        ).execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"RPC find_alerts_without_verdict failed (run migration?): {e!s}",
+        ) from e
+
+    rows = res.data or []
+    ids_out: list[str] = []
+    for row in rows:
+        raw_id = row.get("id")
+        if not raw_id:
+            continue
+        aid = UUID(str(raw_id))
+        ids_out.append(str(aid))
+        background_tasks.add_task(triage_agent.investigate, aid)
+
+    return {"reprocessed_count": len(ids_out), "alert_ids": ids_out}
 
 
 @router.get("/", response_model=list[AlertResponse])

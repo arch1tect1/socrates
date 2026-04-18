@@ -15,6 +15,7 @@ from ..cache import get_supabase_client
 from ..services import alert_ingestion
 from .tool_executor import ToolExecutor
 from .tools import TRIAGE_TOOLS
+from .whitelist_config import is_ioc_whitelisted
 
 logger = logging.getLogger("socrates.triage_agent")
 
@@ -149,6 +150,19 @@ async def _anthropic_messages(
     return resp.json()
 
 
+def _status_for_verdict(verdict: str, confidence: float) -> str:
+    """Map agent verdict to alert workflow status."""
+    v = (verdict or "").lower()
+    c = float(confidence or 0.0)
+    if v == "malicious" and c >= 0.75:
+        return "escalated"
+    if v == "benign" and c >= 0.85:
+        return "resolved"
+    if v == "suspicious":
+        return "investigating"
+    return "investigating"
+
+
 async def _save_verdict(
     alert_id: UUID,
     verdict_data: dict[str, Any],
@@ -174,6 +188,17 @@ async def _save_verdict(
         logger.info("triage: verdict saved alert_id=%s verdict=%s", alert_id, verdict_data["verdict"])
     except Exception as e:
         logger.exception("triage: verdict insert failed: %s", e)
+        return
+
+    new_status = _status_for_verdict(
+        str(verdict_data.get("verdict", "")),
+        float(verdict_data.get("confidence") or 0),
+    )
+    try:
+        sb.table("alerts").update({"status": new_status}).eq("id", str(alert_id)).execute()
+        logger.info("triage: alert status -> %s alert_id=%s", new_status, alert_id)
+    except Exception as e:
+        logger.exception("triage: alert status update failed (verdict saved): %s", e)
 
 
 async def investigate(alert_id: UUID | str) -> None:
@@ -185,6 +210,22 @@ async def investigate(alert_id: UUID | str) -> None:
 
 
 async def _investigate_async(alert_id: UUID) -> None:
+    sb = get_supabase_client()
+    if sb is None:
+        logger.error("triage: Supabase not configured alert_id=%s", alert_id)
+        return
+
+    try:
+        sb.table("alerts").update({"status": "investigating"}).eq("id", str(alert_id)).execute()
+    except Exception as e:
+        logger.warning("triage: could not set status investigating: %s", e)
+
+    try:
+        alert = alert_ingestion.fetch_alert(alert_id)
+    except Exception as e:
+        logger.warning("triage: could not load alert %s: %s", alert_id, e)
+        return
+
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         logger.error("triage: ANTHROPIC_API_KEY not set alert_id=%s", alert_id)
@@ -201,24 +242,44 @@ async def _investigate_async(alert_id: UUID) -> None:
         )
         return
 
-    sb = get_supabase_client()
-    if sb is None:
-        logger.error("triage: Supabase not configured alert_id=%s", alert_id)
+    if not alert.iocs:
+        await _save_verdict(
+            alert_id,
+            {
+                "verdict": "inconclusive",
+                "confidence": 0.2,
+                "reasoning": (
+                    "No IOCs were extracted from this alert. "
+                    "The agent cannot investigate without investigable artifacts (IPs, domains, URLs, hashes). "
+                    "Manual review is required: either the alert payload lacks indicators, "
+                    "or the extractor needs improvement for this alert format."
+                ),
+                "recommended_action": "escalate_l2",
+            },
+            [],
+            [{"note": "early_exit_no_iocs"}],
+        )
         return
 
-    try:
-        alert = alert_ingestion.fetch_alert(alert_id)
-    except Exception as e:
-        logger.warning("triage: could not load alert %s: %s", alert_id, e)
+    if all(is_ioc_whitelisted(ioc) for ioc in alert.iocs):
+        vals = [ioc.ioc_value for ioc in alert.iocs]
+        await _save_verdict(
+            alert_id,
+            {
+                "verdict": "benign",
+                "confidence": 0.9,
+                "reasoning": (
+                    f"All {len(alert.iocs)} IOC(s) match the trusted whitelist (DNS / known SaaS): {vals}"
+                ),
+                "recommended_action": "close_fp",
+            },
+            [{"name": "whitelist_check", "matched": len(alert.iocs)}],
+            [{"note": "early_exit_all_whitelisted"}],
+        )
         return
 
     alert_blob = alert.model_dump(mode="json")
     user_text = f"Alert to investigate:\n{json.dumps(alert_blob, default=str, indent=2)}"
-
-    try:
-        sb.table("alerts").update({"status": "investigating"}).eq("id", str(alert_id)).execute()
-    except Exception as e:
-        logger.warning("triage: could not set status investigating: %s", e)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
     trace: list[dict[str, Any]] = []
