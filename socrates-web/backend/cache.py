@@ -106,6 +106,137 @@ def get_supabase_client():
     return _get_client()
 
 
+def get_cached_enrichment_for_source(ioc_value: str, source_db_key: str) -> dict | None:
+    """
+    Return enrichment payload for one source if a non-expired ioc_queries row exists
+    with a complete enrichment_results row (Phase 3 triage tool cache).
+    """
+    sb = _get_client()
+    if sb is None:
+        return None
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        clean = ioc_value.lower().strip()
+
+        qres = (
+            sb.table("ioc_queries")
+            .select("id")
+            .eq("ioc_value", clean)
+            .gt("expires_at", now)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = qres.data or []
+        if not rows:
+            return None
+
+        query_id = rows[0]["id"]
+        eres = (
+            sb.table("enrichment_results")
+            .select("data, status")
+            .eq("query_id", query_id)
+            .eq("source", source_db_key)
+            .eq("status", "complete")
+            .limit(1)
+            .execute()
+        )
+        erows = eres.data or []
+        if not erows or not erows[0].get("data"):
+            return None
+
+        return {"cached": True, "data": erows[0]["data"], "query_id": str(query_id)}
+    except Exception as e:
+        logger.warning("get_cached_enrichment_for_source failed: %s", _format_db_exception(e))
+        return None
+
+
+def save_tool_enrichment_to_cache(
+    ioc_value: str,
+    ioc_type_db: str,
+    source_db_key: str,
+    data: dict[str, Any],
+    elapsed: float,
+) -> None:
+    """
+    Persist a single-source enrichment into ioc_queries + enrichment_results so later
+    triage runs can skip external API calls within the TTL window.
+    """
+    sb = _get_client()
+    if sb is None:
+        return
+
+    clean = ioc_value.lower().strip()
+    ttl_hours = 24
+    expires = (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat()
+
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        qres = (
+            sb.table("ioc_queries")
+            .select("id")
+            .eq("ioc_value", clean)
+            .gt("expires_at", now)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = qres.data or []
+        if rows:
+            query_id = rows[0]["id"]
+        else:
+            insert_row: dict[str, Any] = {
+                "ioc_value": clean,
+                "ioc_type": ioc_type_db,
+                "verdict": "INCONCLUSIVE",
+                "confidence": "LOW",
+                "total_time_seconds": round(elapsed, 2),
+                "expires_at": expires,
+            }
+            ins = sb.table("ioc_queries").insert(insert_row).select("id").execute()
+            ins_rows = ins.data or []
+            if not ins_rows:
+                logger.warning("save_tool_enrichment_to_cache: ioc_queries insert failed for %r", clean)
+                return
+            query_id = ins_rows[0]["id"]
+
+        existing = (
+            sb.table("enrichment_results")
+            .select("id")
+            .eq("query_id", query_id)
+            .eq("source", source_db_key)
+            .limit(1)
+            .execute()
+        )
+        erow = {
+            "query_id": query_id,
+            "source": source_db_key,
+            "status": "complete",
+            "response_time_seconds": round(elapsed, 2),
+            "data": data,
+        }
+        if existing.data:
+            sb.table("enrichment_results").update(
+                {
+                    "status": "complete",
+                    "response_time_seconds": round(elapsed, 2),
+                    "data": data,
+                }
+            ).eq("id", existing.data[0]["id"]).execute()
+        else:
+            sb.table("enrichment_results").insert(erow).execute()
+
+        logger.info(
+            "save_tool_enrichment_to_cache: source=%s ioc=%s query_id=%s",
+            source_db_key,
+            clean,
+            query_id,
+        )
+    except Exception as e:
+        logger.warning("save_tool_enrichment_to_cache failed: %s", _format_db_exception(e))
+
+
 async def check_cache(ioc_value: str) -> dict | None:
     """Return cached result for an IOC if it exists and hasn't expired."""
     sb = _get_client()
