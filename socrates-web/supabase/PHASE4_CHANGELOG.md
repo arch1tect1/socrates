@@ -10,10 +10,12 @@
 
 ## Env (Vercel + local)
 
-Set in the **frontend build** (Vercel → Project → Environment Variables):
+The Vite build resolves the browser client from (first match wins):
 
-- `VITE_SUPABASE_URL` — same project URL as `SUPABASE_URL`
-- `VITE_SUPABASE_ANON_KEY` — **anon** key (not service role); RLS must allow `SELECT` on `alerts`, `alert_iocs`, `verdicts` for anon (or use authenticated users later).
+- URL: `SUPABASE_URL` or `VITE_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_URL`
+- Anon: `NEXT_PUBLIC_SUPABASE_ANON_KEY` or `VITE_SUPABASE_ANON_KEY`
+
+So existing Vercel vars like **`SUPABASE_URL`** + **`NEXT_PUBLIC_SUPABASE_ANON_KEY`** work with no duplicates. Use the **anon** key only in the frontend (not the service role). RLS must allow `SELECT` on `alerts`, `alert_iocs`, `verdicts` for anon (or use authenticated users later).
 
 ## Manual checks
 
