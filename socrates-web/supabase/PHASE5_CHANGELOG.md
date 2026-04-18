@@ -21,7 +21,8 @@ Whitelist defaults + env extensions: `backend/agents/whitelist_config.py`
 
 ## A.3 Reprocess stuck
 
-- **SQL:** `supabase/migrations/20260418_find_alerts_without_verdict.sql` — function `find_alerts_without_verdict(cutoff timestamptz)`.
+- **SQL:** `supabase/migrations/20260418_find_alerts_without_verdict.sql` — function `find_alerts_without_verdict(cutoff timestamptz)` + `GRANT EXECUTE` for PostgREST.
+- **PGRST202** (“function not in schema cache”): run `sql/fix_find_alerts_rpc_grants.sql`, or use the HTTP handler fallback (paginated query in Python — no RPC required).
 - **API:** `POST /api/v1/alerts/admin/reprocess-stuck?older_than_minutes=10`  
   If `SOCRATES_ADMIN_SECRET` is set, send header `X-SOCrates-Admin-Secret: <same value>`.
 

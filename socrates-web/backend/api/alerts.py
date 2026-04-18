@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Que
 
 from ..agents import triage_agent
 from ..cache import get_supabase_client
+from ..services.stuck_alerts import list_stuck_alerts_fallback, list_stuck_alerts_via_rpc
 from ..models.alerts import (
     AlertResponse,
     AlertStatus,
@@ -74,18 +75,20 @@ async def reprocess_stuck_alerts(
         raise HTTPException(status_code=503, detail="Supabase not configured")
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+    cutoff_iso = cutoff.isoformat()
+
+    rows: list[dict] = []
     try:
-        res = sb.rpc(
-            "find_alerts_without_verdict",
-            {"cutoff": cutoff.isoformat()},
-        ).execute()
+        rpc_rows = list_stuck_alerts_via_rpc(sb, cutoff_iso)
+        if rpc_rows is not None:
+            rows = rpc_rows
+        else:
+            rows = list_stuck_alerts_fallback(sb, cutoff_iso)
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"RPC find_alerts_without_verdict failed (run migration?): {e!s}",
+            detail=f"Failed to list stuck alerts: {e!s}",
         ) from e
-
-    rows = res.data or []
     ids_out: list[str] = []
     for row in rows:
         raw_id = row.get("id")

@@ -15,3 +15,8 @@ $$;
 
 COMMENT ON FUNCTION public.find_alerts_without_verdict(timestamptz) IS
   'Used by API admin/reprocess-stuck to backfill triage for stuck alerts.';
+
+-- PostgREST exposes RPC only if the role used by the API can EXECUTE:
+GRANT EXECUTE ON FUNCTION public.find_alerts_without_verdict(timestamptz) TO anon;
+GRANT EXECUTE ON FUNCTION public.find_alerts_without_verdict(timestamptz) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.find_alerts_without_verdict(timestamptz) TO service_role;
