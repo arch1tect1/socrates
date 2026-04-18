@@ -1,14 +1,20 @@
-import { Shield, Search } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Shield, Search, LayoutList } from "lucide-react";
 import ThemeToggle from "./ThemeToggle";
 
 const CVE_ANALYZER_URL = "https://cve-analyzer.lovable.app/";
 
 export default function Header({ onReset }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+
   const goHome = (e) => {
     e?.preventDefault?.();
     e?.stopPropagation?.();
-    if (typeof onReset === "function") {
-      onReset();
+    if (location.pathname === "/") {
+      if (typeof onReset === "function") onReset();
+    } else {
+      navigate("/");
     }
   };
 
@@ -75,7 +81,20 @@ export default function Header({ onReset }) {
           </span>
         </a>
 
-        <div className="justify-self-end flex-shrink-0 relative z-[2]">
+        <div className="justify-self-end flex-shrink-0 relative z-[2] flex items-center gap-2 sm:gap-3">
+          <Link
+            to="/alerts"
+            className="flex items-center gap-1.5 text-[11px] sm:text-xs font-mono font-medium px-2 py-1 rounded-md border transition-opacity hover:opacity-90 no-underline"
+            style={{
+              color: "var(--text-secondary)",
+              borderColor: "var(--border)",
+              background: "rgba(34,211,238,0.04)",
+            }}
+            title="Alerts dashboard"
+          >
+            <LayoutList size={14} className="text-accent-cyan shrink-0" />
+            <span className="hidden sm:inline">Alerts</span>
+          </Link>
           <ThemeToggle />
         </div>
       </div>
