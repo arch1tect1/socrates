@@ -9,7 +9,11 @@ logger = logging.getLogger("socrates.stuck_alerts")
 
 
 def list_stuck_alerts_via_rpc(sb: Any, cutoff_iso: str) -> list[dict] | None:
-    """Return rows from RPC, or None if the function is missing / PostgREST error."""
+    """Return rows from RPC, or None so the caller uses the Python fallback.
+
+    Any RPC/PostgREST error falls back — avoids brittle string matching on exception types
+    and works when the DB function or grants are missing.
+    """
     try:
         res = sb.rpc(
             "find_alerts_without_verdict",
@@ -17,15 +21,8 @@ def list_stuck_alerts_via_rpc(sb: Any, cutoff_iso: str) -> list[dict] | None:
         ).execute()
         return res.data or []
     except Exception as e:
-        msg = str(e).lower()
-        if (
-            "pgrst202" in msg
-            or "could not find the function" in msg
-            or "schema cache" in msg
-        ):
-            logger.warning("find_alerts_without_verdict RPC unavailable: %s", e)
-            return None
-        raise
+        logger.warning("find_alerts_without_verdict RPC skipped (fallback): %s", e)
+        return None
 
 
 def list_stuck_alerts_fallback(sb: Any, cutoff_iso: str, *, max_rows: int = 500) -> list[dict]:
