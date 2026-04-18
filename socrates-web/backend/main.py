@@ -22,6 +22,7 @@ from .models.schemas import (
     SourceStatus,
 )
 from .skip_reasons import skip_reason_for_source
+from .api.alerts import router as alerts_router
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
@@ -37,6 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(alerts_router, prefix="/api/v1/alerts", tags=["alerts"])
 
 IOC_PATTERNS = [
     (
@@ -252,18 +255,20 @@ async def analysis_stream(
         if status == "skipped" and skip_reason:
             row["skip_reason"] = skip_reason
         source_results_for_cache.append(row)
-    try:
-        await save_results(
-            ioc,
-            ioc_type_str,
-            source_results_for_cache,
-            enrichment_data,
-            ai_result,
-            total_elapsed,
-            session_id=session_id,
+    cache_id = await save_results(
+        ioc,
+        ioc_type_str,
+        source_results_for_cache,
+        enrichment_data,
+        ai_result,
+        total_elapsed,
+        session_id=session_id,
+    )
+    if cache_id is None:
+        logger.warning(
+            "SSE analysis finished but Supabase save returned no query_id — check Vercel logs "
+            "(socrates.cache) for RLS, service_role key, or session_id column."
         )
-    except Exception:
-        logger.debug("Cache save failed in SSE stream", exc_info=True)
 
     yield _sse("done", {"total_elapsed": total_elapsed})
 
@@ -365,19 +370,20 @@ async def analyze_ioc_batch(request: AnalyzeRequest):
 
     total_elapsed = round(time.time() - overall_start, 2)
 
-    # Save to cache
-    try:
-        await save_results(
-            ioc,
-            ioc_type_str,
-            source_results,
-            enrichment_data,
-            ai_result,
-            total_elapsed,
-            session_id=sid,
+    cache_id = await save_results(
+        ioc,
+        ioc_type_str,
+        source_results,
+        enrichment_data,
+        ai_result,
+        total_elapsed,
+        session_id=sid,
+    )
+    if cache_id is None:
+        logger.warning(
+            "Batch analysis finished but Supabase save returned no query_id — check Vercel logs "
+            "(socrates.cache) for RLS, service_role key, or session_id column."
         )
-    except Exception:
-        logger.debug("Cache save failed in batch endpoint", exc_info=True)
 
     return {
         "ioc": ioc,

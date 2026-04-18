@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-01-15T10:23:45.123Z",
+  "rule": {
+    "level": 10,
+    "description": "Multiple authentication failures",
+    "id": "5712",
+    "mitre": {"id": ["T1110"]}
+  },
+  "agent": {"name": "web-server-01", "ip": "10.0.1.5"},
+  "data": {
+    "srcip": "185.234.217.42",
+    "srcuser": "admin",
+    "dstuser": "root"
+  },
+  "full_log": "Failed password for root from 185.234.217.42 port 54321 ssh2"
+}

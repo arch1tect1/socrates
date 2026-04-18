@@ -24,29 +24,72 @@ SOURCE_KEY_MAP = {
 SOURCE_KEY_REVERSE = {v: k for k, v in SOURCE_KEY_MAP.items()}
 
 
+def _debug_supabase_enabled() -> bool:
+    return os.getenv("SOCRATES_SUPABASE_DEBUG", "").strip().lower() in ("1", "true", "yes")
+
+
+def _log_supabase_env() -> None:
+    """Safe diagnostics (never log secrets)."""
+    if not _debug_supabase_enabled():
+        return
+    url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL") or ""
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).netloc or "(invalid URL)"
+    except Exception:
+        host = "(could not parse URL)"
+    has_service = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+    has_anon = bool(os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY"))
+    logger.info(
+        "SOCRATES_SUPABASE_DEBUG: host=%s SUPABASE_SERVICE_ROLE_KEY=%s NEXT_PUBLIC_SUPABASE_ANON_KEY=%s",
+        host,
+        "set" if has_service else "missing",
+        "set" if has_anon else "missing",
+    )
+
+
+def _format_db_exception(exc: BaseException) -> str:
+    parts = [f"{type(exc).__name__}: {exc}"]
+    for attr in ("message", "details", "hint", "code"):
+        if hasattr(exc, attr):
+            val = getattr(exc, attr)
+            if val is not None and str(val) and str(val) not in parts[0]:
+                parts.append(f"{attr}={val!r}")
+    if getattr(exc, "args", None) and isinstance(exc.args[0], dict):
+        parts.append(f"payload={exc.args[0]!r}")
+    return " | ".join(parts)
+
+
 def _get_client():
     global _client
     if _client is not None:
         return _client
+
+    _log_supabase_env()
 
     url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     service = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     key = service or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 
     if not url or not key:
-        logger.info("Supabase not configured — caching disabled")
+        logger.warning(
+            "Supabase not configured — caching disabled "
+            "(need SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY or NEXT_PUBLIC_SUPABASE_ANON_KEY)"
+        )
         return None
 
     if not service:
         logger.warning(
             "Supabase: SUPABASE_SERVICE_ROLE_KEY is not set; using anon key. "
-            "Inserts usually fail when Row Level Security is enabled on ioc_queries "
-            "(dashboard shows rows only in Table Editor as postgres). "
-            "Set SUPABASE_SERVICE_ROLE_KEY on the server (Vercel env, etc.)."
+            "Inserts usually fail when Row Level Security is enabled on ioc_queries. "
+            "Set SUPABASE_SERVICE_ROLE_KEY on the server (Vercel env). "
+            "Never expose the service role in NEXT_PUBLIC_* or frontend bundles."
         )
 
     try:
         from supabase import create_client
+
         _client = create_client(url, key)
         logger.info(
             "Supabase cache client initialised (%s)",
@@ -54,8 +97,13 @@ def _get_client():
         )
         return _client
     except Exception as e:
-        logger.warning(f"Failed to create Supabase client: {e}")
+        logger.error("Failed to create Supabase client: %s", _format_db_exception(e), exc_info=True)
         return None
+
+
+def get_supabase_client():
+    """Return the shared Supabase client (or None if not configured). Used by cache and alerts."""
+    return _get_client()
 
 
 async def check_cache(ioc_value: str) -> dict | None:
@@ -128,7 +176,7 @@ async def check_cache(ioc_value: str) -> dict | None:
         }
 
     except Exception as e:
-        logger.warning(f"Cache check failed: {e}")
+        logger.warning("Cache check failed: %s", _format_db_exception(e))
         return None
 
 
@@ -144,11 +192,22 @@ async def save_results(
     """Persist analysis results to Supabase. Returns query_id on success."""
     sb = _get_client()
     if sb is None:
+        logger.warning(
+            "save_results: skipped persist for ioc=%r — Supabase client unavailable",
+            ioc_value[:120] if ioc_value else "",
+        )
         return None
 
-    try:
-        clean = ioc_value.lower().strip()
+    clean = ioc_value.lower().strip()
+    logger.info(
+        "save_results: start ioc_value=%s ioc_type=%s session_id=%s sources=%d",
+        clean,
+        ioc_type,
+        "set" if (session_id and session_id.strip()) else "none",
+        len(source_results),
+    )
 
+    try:
         ttl_hours = 24
         v = ai_verdict.get("verdict", "")
         c = ai_verdict.get("confidence", "")
@@ -168,11 +227,20 @@ async def save_results(
             "expires_at": expires,
         }
         if session_id:
-            insert_row["session_id"] = session_id
+            insert_row["session_id"] = session_id.strip()
 
-        query_res = sb.table("ioc_queries").insert(insert_row).execute()
+        query_res = sb.table("ioc_queries").insert(insert_row).select("id").execute()
+        rows = query_res.data if query_res.data is not None else []
+        if not rows:
+            logger.error(
+                "save_results: ioc_queries INSERT returned no row (check RLS, column session_id, or schema). "
+                "response=%r",
+                getattr(query_res, "data", None),
+            )
+            return None
 
-        query_id = query_res.data[0]["id"]
+        query_id = rows[0]["id"]
+        logger.info("save_results: ioc_queries row created query_id=%s", query_id)
 
         enrichment_rows = []
         for sr in source_results:
@@ -187,32 +255,83 @@ async def save_results(
             })
 
         if enrichment_rows:
-            sb.table("enrichment_results").insert(enrichment_rows).execute()
+            try:
+                sb.table("enrichment_results").insert(enrichment_rows).execute()
+                logger.info(
+                    "save_results: enrichment_results inserted count=%d",
+                    len(enrichment_rows),
+                )
+            except Exception as e:
+                logger.error(
+                    "save_results: enrichment_results INSERT failed: %s",
+                    _format_db_exception(e),
+                    exc_info=True,
+                )
+                try:
+                    sb.table("ioc_queries").delete().eq("id", query_id).execute()
+                except Exception as rollback_exc:
+                    logger.warning(
+                        "save_results: rollback ioc_queries %s failed: %s",
+                        query_id,
+                        _format_db_exception(rollback_exc),
+                    )
+                return None
 
-        sb.table("ai_verdicts").insert({
-            "query_id": query_id,
-            "verdict": ai_verdict.get("verdict", "INCONCLUSIVE"),
-            "confidence": ai_verdict.get("confidence", "LOW"),
-            "reasoning": ai_verdict.get("reasoning", ""),
-            "key_findings": ai_verdict.get("key_findings", []),
-            "mitre_attack": ai_verdict.get("mitre_attack", []),
-            "recommended_actions": ai_verdict.get("recommended_actions", []),
-            "model_used": ai_verdict.get("model_used", "claude-sonnet-4-20250514"),
-        }).execute()
+        try:
+            sb.table("ai_verdicts").insert({
+                "query_id": query_id,
+                "verdict": ai_verdict.get("verdict", "INCONCLUSIVE"),
+                "confidence": ai_verdict.get("confidence", "LOW"),
+                "reasoning": ai_verdict.get("reasoning", ""),
+                "key_findings": ai_verdict.get("key_findings", []),
+                "mitre_attack": ai_verdict.get("mitre_attack", []),
+                "recommended_actions": ai_verdict.get("recommended_actions", []),
+                "model_used": ai_verdict.get("model_used", "claude-sonnet-4-20250514"),
+            }).execute()
+            logger.info("save_results: ai_verdicts row created query_id=%s", query_id)
+        except Exception as e:
+            logger.error(
+                "save_results: ai_verdicts INSERT failed: %s",
+                _format_db_exception(e),
+                exc_info=True,
+            )
+            try:
+                sb.table("ioc_queries").delete().eq("id", query_id).execute()
+            except Exception as rollback_exc:
+                logger.warning(
+                    "save_results: rollback ioc_queries %s failed: %s",
+                    query_id,
+                    _format_db_exception(rollback_exc),
+                )
+            return None
 
-        logger.info(f"Cached results for {clean} (query_id={query_id}, ttl={ttl_hours}h)")
+        logger.info(
+            "save_results: OK query_id=%s ioc=%s ttl=%sh (Supabase cache + history complete)",
+            query_id,
+            clean,
+            ttl_hours,
+        )
         return query_id
 
     except Exception as e:
         msg = str(e).lower()
-        if "row-level security" in msg or "rls" in msg or "42501" in msg:
-            logger.warning(
-                "Failed to save results (RLS or permission): %s. "
-                "Use SUPABASE_SERVICE_ROLE_KEY on this server, or relax RLS on cache tables.",
-                e,
+        formatted = _format_db_exception(e)
+        if "row-level security" in msg or "rls" in msg or "42501" in msg or "permission denied" in msg:
+            logger.error(
+                "save_results: RLS/permission denied — %s. "
+                "Set SUPABASE_SERVICE_ROLE_KEY on Vercel, or add INSERT policies / disable RLS. "
+                "See sql/fix_cache_writes_rls.sql",
+                formatted,
+                exc_info=True,
+            )
+        elif "session_id" in msg and ("column" in msg or "does not exist" in msg):
+            logger.error(
+                "save_results: schema error — %s. Run sql/add_session_id.sql (or add_session_id + index).",
+                formatted,
+                exc_info=True,
             )
         else:
-            logger.warning("Failed to save results: %s", e)
+            logger.error("save_results: failed — %s", formatted, exc_info=True)
         return None
 
 
@@ -251,5 +370,5 @@ async def get_history(limit: int = 20, session_id: str | None = None) -> list[di
         return items
 
     except Exception as e:
-        logger.warning(f"Failed to load history: {e}")
+        logger.warning("Failed to load history: %s", _format_db_exception(e))
         return []
