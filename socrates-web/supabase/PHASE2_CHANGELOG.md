@@ -32,6 +32,8 @@
 
 ## Manual testing
 
+On **Vercel**, OpenAPI/Swagger lives at **`/api/docs`** (not `/docs` — static hosting only routes `/api/*` to Python).
+
 **1. Env** — `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (recommended). Phase 1 migration applied (`alerts`, `alert_iocs`, `verdicts`).
 
 **2. Run API** (from `socrates-web/`):

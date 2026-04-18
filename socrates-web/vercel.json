@@ -2,6 +2,13 @@
   "buildCommand": "cd frontend && npm install && npm run build",
   "outputDirectory": "frontend/dist",
   "framework": null,
+  "redirects": [
+    {
+      "source": "/docs",
+      "destination": "/api/docs",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api" }
   ]

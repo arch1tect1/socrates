@@ -29,7 +29,14 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("socrates")
 
-app = FastAPI(title="SOCrates API", version="1.0.0")
+# Docs under /api/* so Vercel rewrites (see vercel.json) route them to the Python function.
+app = FastAPI(
+    title="SOCrates API",
+    version="1.0.0",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    redoc_url="/api/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
