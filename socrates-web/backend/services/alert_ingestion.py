@@ -176,7 +176,6 @@ def update_alert_status(alert_id: UUID, status: AlertStatus) -> AlertResponse:
         sb.table("alerts")
         .update({"status": status})
         .eq("id", aid)
-        .select("*")
         .execute()
     )
     rows = res.data or []
@@ -218,7 +217,7 @@ def ingest(
     }
 
     try:
-        ins = sb.table("alerts").insert(insert_row).select("*").execute()
+        ins = sb.table("alerts").insert(insert_row).execute()
     except Exception as e:
         logger.exception("alerts insert failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Database error: {e!s}") from e

@@ -194,7 +194,7 @@ def save_tool_enrichment_to_cache(
                 "total_time_seconds": round(elapsed, 2),
                 "expires_at": expires,
             }
-            ins = sb.table("ioc_queries").insert(insert_row).select("id").execute()
+            ins = sb.table("ioc_queries").insert(insert_row).execute()
             ins_rows = ins.data or []
             if not ins_rows:
                 logger.warning("save_tool_enrichment_to_cache: ioc_queries insert failed for %r", clean)
@@ -360,7 +360,7 @@ async def save_results(
         if session_id:
             insert_row["session_id"] = session_id.strip()
 
-        query_res = sb.table("ioc_queries").insert(insert_row).select("id").execute()
+        query_res = sb.table("ioc_queries").insert(insert_row).execute()
         rows = query_res.data if query_res.data is not None else []
         if not rows:
             logger.error(
